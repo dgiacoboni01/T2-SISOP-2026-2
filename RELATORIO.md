@@ -627,9 +627,11 @@ Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80, SCAN 49.996
 
 ## 8. Declaração de autoria e uso de IA
 
-**Quem fez o quê:** [descrever a divisão do trabalho entre os integrantes — por exemplo, quem revisou e testou cada módulo, quem conferiu cada experimento e quem revisou cada seção do relatório]
+Diogo: escalonadores (N2 e M2), os experimentos X1, X2 e X7, o repositório e a organização da entrega.
+Pedro: sistema de arquivos e links (N3 e M4), os experimentos X3, X4, X5 e X9.
+Elisa: cache, DMA e buffering (M1 e M3), a integração e os experimentos X6, X8 e X12.
+Maria Julia: proteção e travas (M5), alocação (M6), o bônus do flash, os experimentos X10, X11 e X13 e a pesquisa sobre sistemas reais da seção 4.
 
-**Uso de ferramentas de IA:**
 
 | Ferramenta | Finalidade | Onde foi usada (arquivos ou seções) |
 |---|---|---|
