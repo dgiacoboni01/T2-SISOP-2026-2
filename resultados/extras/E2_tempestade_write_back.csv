@@ -1,0 +1,7 @@
+intervalo_sync_ms,escalonador,resposta_media_ms,resposta_p95_ms,leituras_ate_1s_apos_sync,resposta_media_leitura_apos_sync_ms,resposta_media_leitura_demais_ms,escritas_fisicas
+1000.0000,FCFS,22.2272,184.6430,1873,35.1613,10.0423,799
+1000.0000,SSTF,5.8622,23.1110,1873,8.9862,9.2015,799
+5000.0000,FCFS,45.4100,265.3830,324,309.8781,21.9672,541
+5000.0000,SSTF,8.9395,17.5340,324,60.1577,4.4920,541
+30000.0000,FCFS,3.4828,18.1810,0,0.0000,5.3440,228
+30000.0000,SSTF,3.1144,16.6120,0,0.0000,4.7786,228

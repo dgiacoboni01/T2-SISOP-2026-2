@@ -1,0 +1,19 @@
+{
+  "integrantes": [
+    {
+      "nome": "Nome Completo do Integrante 1"
+    }
+  ],
+  "repositorio": "https://github.com/usuario/nome-do-repositorio",
+  "modulos": [
+    "M1",
+    "M2",
+    "M3",
+    "M4",
+    "M5",
+    "M6"
+  ],
+  "integracao": true,
+  "bonus_flash": true,
+  "observacoes": "Todos os módulos, a integração e o bônus foram implementados. Experimentos extras (E1, E2) em extras/experimentos_extras.py, com saída em resultados/extras/ e graficos/extras/."
+}
