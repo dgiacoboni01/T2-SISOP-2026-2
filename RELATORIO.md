@@ -1,8 +1,8 @@
 # Relatório — SimES: simulador de E/S e de sistema de arquivos
 
-**Integrantes:** [NOME COMPLETO DO INTEGRANTE 1, NOME COMPLETO DO INTEGRANTE 2, ...]
+**Integrantes:** Diogo Gallo, Pedro Wagner, Elisa Rigotti, Maria Julia
 
-**Repositório:** [https://github.com/USUARIO/REPOSITORIO]
+**Repositório:** https://github.com/dgiacoboni01/T2-SISOP-2026-2
 
 ## 0. Resumo
 

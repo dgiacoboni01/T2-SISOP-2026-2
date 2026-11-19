@@ -1,10 +1,19 @@
 {
   "integrantes": [
     {
-      "nome": "Nome Completo do Integrante 1"
+      "nome": "Diogo Gallo"
+    },
+    {
+      "nome": "Pedro Wagner"
+    },
+    {
+      "nome": "Elisa Rigotti"
+    },
+    {
+      "nome": "Maria Julia"
     }
   ],
-  "repositorio": "https://github.com/usuario/nome-do-repositorio",
+  "repositorio": "https://github.com/dgiacoboni01/T2-SISOP-2026-2",
   "modulos": [
     "M1",
     "M2",
