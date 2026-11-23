@@ -24,5 +24,5 @@
   ],
   "integracao": true,
   "bonus_flash": true,
-  "observacoes": "Todos os módulos, a integração e o bônus foram implementados. Experimentos extras (E1, E2) em extras/experimentos_extras.py, com saída em resultados/extras/ e graficos/extras/."
+  "observacoes": "Todos os módulos, a integração e o bônus foram implementados. Experimentos extras (E1, E2) em extras/experimentos_extras.py e E3 (medição real do open, complementa o X4) em extras/e3_open_real.py, com saída em resultados/extras/ e graficos/extras/."
 }

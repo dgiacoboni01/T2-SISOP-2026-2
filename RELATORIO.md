@@ -30,7 +30,7 @@ Implementamos todo o SimES: o núcleo (SSTF, SCAN, custo de CPU por polling e po
 
 Resultado dos testes automáticos (`python3 executar.py testes`): `Ran 50 tests in 0.085s — OK` (nenhum teste pulado; 24 dos 50 testes são nossos, em `testes/test_grupo.py`).
 
-Experimentos extras (declarados, em configuração separada): `extras/experimentos_extras.py` grava em `resultados/extras/` e `graficos/extras/`. Não alteram `parametros.py`, as cargas nem `experimentos.py`; os resultados oficiais são os de `resultados/*.csv`.
+Experimentos extras (declarados, em configuração separada): `extras/experimentos_extras.py` (E1 e E2, simulados) e `extras/e3_open_real.py` (E3, medição do `open` numa máquina real, que complementa o X4) gravam em `resultados/extras/` e `graficos/extras/`. Não alteram `parametros.py`, as cargas nem `experimentos.py`; os resultados oficiais são os de `resultados/*.csv`.
 
 ## 2. Implementação
 
@@ -245,7 +245,7 @@ No total, foram 1,38 acesso/op e 3,07 ms/op no compilador, contra 0,55 acesso/op
 
 **Fundamentação:** Silberschatz §11.3 (diretórios em árvore) e as regras de custo de `sistema.py`: resolver lê um bloco por diretório do caminho. Sem cache de diretórios, cada nível é um acesso ao disco.
 
-**Configuração:** Uma cadeia de `d` diretórios (`/n1/n2/…/nd`) com `f.txt` no fim, `d` = 1…10, e 20 ciclos de `open` + `read` + `close` de 4 KiB por P2. Alocação contígua.
+**Configuração:** Uma cadeia de `d` diretórios (`/n1/n2/…/nd`) com `f.txt` no fim, `d` = 1…10, e 20 ciclos de `open` + `read` + `close` de 4 KiB por P2. Alocação contígua. Extra E3 (fora dos resultados oficiais): a mesma cadeia de 1 a 10 diretórios, criada de verdade num SSD e num HDD de uma máquina real, medindo 5.000 `os.open` + `os.close` por profundidade (`extras/e3_open_real.py`).
 
 **Resultados:**
 
@@ -254,13 +254,23 @@ No total, foram 1,38 acesso/op e 3,07 ms/op no compilador, contra 0,55 acesso/op
 | Acessos por open | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
 | Tempo por open (ms) | 4,25 | 4,29 | 4,33 | 4,37 | 4,41 | 4,45 | 4,49 | 4,53 | 4,57 | 4,61 |
 
-**Evidências:** resultados/arquivos_por_operacao.csv (experimento=X4, operacao=open); graficos/X4_open_por_profundidade.png.
+Extra E3, na máquina real (Windows 11, NTFS, Intel Core i5-11400H): mediana de 5.000 `open` + `close` por profundidade, com os metadados na cache. Os tempos estão em **µs** (1 ms = 1.000 µs).
+
+| Profundidade | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| SSD (C:), µs | 27,1 | 27,2 | 27,3 | 27,1 | 27,2 | 27,2 | 27,2 | 27,4 | 27,4 | 27,3 |
+| HDD (D:), µs | 40,9 | 41,2 | 41,0 | 42,2 | 42,1 | 41,8 | 41,6 | 41,5 | 42,4 | 41,6 |
+
+**Evidências:** resultados/arquivos_por_operacao.csv (experimento=X4, operacao=open); graficos/X4_open_por_profundidade.png; extra E3: resultados/extras/E3_open_real.csv; graficos/extras/E3_open_real.png.
 
 **Análise:**
 - **Acessos:** crescem exatamente como `d + 1`.
-- **Tempo:** sobe só **0,04 ms por nível**, o tempo de transferir um bloco. Os diretórios foram criados em sequência numa partição vazia com alocação contígua (first-fit), então ocupam os blocos 0, 1, 2, …, *d* consecutivos. Só a primeira leitura (raiz) paga busca + rotação (≈4,2 ms); cada diretório seguinte é o bloco físico seguinte e, pela regra do modelo, não paga rotação.
+- **Tempo:** sobe só **0,04 ms por nível**, o tempo de transferir um bloco. Os diretórios foram criados em sequência numa partição vazia com alocação contígua (first-fit), então ocupam os blocos 0, 1, 2, …, *d* consecutivos. Só a primeira leitura (raiz) paga a latência rotacional (4,17 ms). Nem busca ela paga, porque todos esses blocos estão no cilindro 0, onde o braço já está. Cada diretório seguinte é o bloco físico seguinte e, pela regra do modelo, não paga rotação. Assim, o tempo do `open` é 4,17 + (*d* + 1) × 0,04 ms: 4,25 ms para *d* = 1 e 4,61 ms para *d* = 10, exatamente os valores da tabela.
+- **O `read` custa 0,04 ms:** o bloco de `f.txt` foi alocado logo depois do último diretório, então a leitura continua a sequência e também não paga rotação. Já o `open` seguinte volta ao bloco 0 (raiz) e paga a rotação de novo.
 - O custo real da resolução depende da **localidade dos metadados**. Sistemas reais tentam obter essa localidade (grupos de blocos do ext4, MFT do NTFS) e, sobretudo, evitam o disco com caches de nomes (seção 4).
 - **Por que a hipótese errou no tempo:** ela supunha diretórios espalhados. Com diretórios espalhados, cada nível custaria ~5 ms, e o `open` a 10 níveis levaria ~55 ms.
+- **Comparação com a máquina real (extra E3):** num sistema real, o `open` + `close` levou 27 µs no SSD e 41 µs no HDD, **constante** de 1 a 10 níveis: a variação ficou abaixo de 1,5 µs, dentro do ruído da medição. O `open` simulado (4,25 a 4,61 ms) é cerca de 160 vezes mais lento, e só o acréscimo de **um** nível no simulador (40 µs) custa mais que um `open` real inteiro. Com os metadados na cache, nem a profundidade nem o tipo de mídia importam: uma única busca ou rotação do HDD custaria milissegundos, e nenhuma medição chegou perto disso. Quem resolve o caminho é a cache de nomes do sistema operacional (seção 4), exatamente o que o modelo não tem. A diferença de ~14 µs entre os dois volumes é constante, não cresce com a profundidade, então não vem da resolução do caminho no disco. Ela deve ser custo fixo por volume (por exemplo, drivers de filtro como o antivírus), mas não a isolamos.
+- **Ressalva do E3:** medimos com a cache quente. Medir com a cache fria exigiria privilégio de administrador (por exemplo, `drop_caches` no Linux), e só nesse caso o disco apareceria. Os números do E3 dependem da máquina e não substituem os oficiais.
 
 **Veredito:** PARCIALMENTE CONFIRMADA
 
@@ -431,7 +441,18 @@ Detalhe a 8 ms (nossa análise, a partir das requisições concluídas): espera 
 **Análise:**
 - **Erros previstos:** todos aconteceram, cada um uma única vez. `a_rigido` continuou legível depois do `unlink /dados/a.txt` (o FCB tinha `links = 2`, e os blocos ficaram ocupados). O `b_simbolico` virou um ponteiro pendente.
 - **Ciclos:** a travessia terminou nas três execuções e não entrou em laço. Os 5 "ciclos" contam toda revisita, como pede a regra: o ciclo verdadeiro (`/dados/sub/volta → /atalhos → dados_simbolico → /dados`) e as revisitas inofensivas, como chegar de novo a `/atalhos` pela raiz depois de tê-lo visitado pelo link. Um `find -L` real distingue os dois casos comparando com os *ancestrais* da travessia, e não com tudo o que já foi visitado.
-- **Custo de seguir links:** o `open` médio custa 4,92 leituras, contra 3 pelo caminho direto. Abrir `/atalhos/dados_simbolico/sub/c.txt` lê `/`, `/atalhos`, recomeça na raiz e lê `/`, `/dados`, `/dados/sub`: 5 leituras. Cada `percorrer` custa ~44 acessos, porque seguir cada link simbólico resolve o alvo desde a raiz.
+- **Custo de seguir links:** cada link simbólico faz a resolução recomeçar da raiz e pagar de novo os diretórios do alvo. Medimos cada `open` da carga:
+
+  | Caminho aberto | Leituras | Caminho direto equivalente |
+  |---|---:|---:|
+  | `/atalhos/a_rigido` (hard link) | 2 | 2 (`/dados/a.txt`) |
+  | `/atalhos/b_simbolico` | 4 | 2 (`/dados/b.txt`) |
+  | `/atalhos/dados_simbolico/sub/c.txt` | 5 | 3 (`/dados/sub/c.txt`) |
+  | `/atalhos/dados_simbolico/sub/volta/a_rigido` (2 links) | 7 | 2 |
+  | `/atalhos/l1` (laço, termina em ELOOP) | 18 | — |
+
+  O hard link não custa nada a mais: é só mais uma entrada de diretório apontando para o mesmo FCB. O link simbólico custa a leitura dos diretórios do alvo, desde a raiz. Por exemplo, `.../c.txt` lê `/` e `/atalhos`, recomeça e lê `/`, `/dados` e `/dados/sub`. O `open` em laço lê `/` e `/atalhos` em cada um dos 9 recomeços até o ELOOP (9 × 2 = 18). É ele que puxa a média para 4,92 leituras por `open`: sem ele, a média dos outros 12 é 3,83.
+- **Custo das travessias:** cada `percorrer` custa 44 acessos, dos quais **36 (82%) vêm dos dois links em laço** (`l1` e `l2`, 18 leituras cada até o ELOOP). Só 3 ou 4 são leituras dos diretórios visitados, e o restante é a resolução dos alvos dos outros links. Um laço de links simbólicos não trava a travessia, graças ao limite de saltos, mas custa caro a cada visita. Num sistema real, esse custo fica na memória (dcache), e o Linux aceita até 40 links numa única resolução antes do ELOOP.
 
 **Veredito:** CONFIRMADA
 
@@ -574,7 +595,7 @@ Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80, SCAN 49.996
 
 **Cache de páginas e gravação periódica (X6, X12, E2).** O Linux acorda as threads de flush periodicamente (`dirty_writeback_centisecs`) e grava dados sujos "velhos" (`dirty_expire_centisecs`), além de limites por volume de dados sujos (`dirty_background_ratio`, `dirty_ratio`) ([kernel: sysctl/vm](https://www.kernel.org/doc/Documentation/sysctl/vm.txt)). O lazy writer do Windows roda a cada segundo e grava uma fração (1/8) das páginas sujas, em vez de despejar tudo de uma vez ([Microsoft: File Caching](https://learn.microsoft.com/en-us/windows/win32/FileIO/file-caching)). Essa é exatamente a mitigação da tempestade que medimos no E2: gravar pouco e com frequência suaviza as rajadas que, no nosso modelo de sincronização total a cada 5 s, multiplicaram por 14 a resposta das leituras. Em todos os sistemas, dados em write-back se perdem numa queda (X6: até 55 blocos). Por isso existem `fsync()` e o write-through por arquivo (`FILE_FLAG_WRITE_THROUGH` no Windows). No macOS, o `fsync()` entrega os dados ao disco, mas não garante que o dispositivo os grave fisicamente. Para isso existe o `F_FULLFSYNC` ([Apple: fsync(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html)), uma camada de cache (a do dispositivo) que nosso modelo não tem.
 
-**Resolução de caminhos e cache de diretórios (X4, X9).** O Linux mantém o dcache, uma cache de nomes (dentries) que torna a resolução quase sempre independente do disco ([kernel: path-lookup](https://www.kernel.org/doc/Documentation/filesystems/path-lookup.md)). No nosso modelo, sem essa cache, cada nível custa uma leitura (X4), e cada link simbólico recomeça a busca desde a raiz (X9). O Linux também limita a quantidade de links simbólicos seguidos (ELOOP), como nosso limite de 8.
+**Resolução de caminhos e cache de diretórios (X4, X9).** O Linux mantém o dcache, uma cache de nomes (dentries) que torna a resolução quase sempre independente do disco ([kernel: path-lookup](https://www.kernel.org/doc/Documentation/filesystems/path-lookup.md)). No nosso modelo, sem essa cache, cada nível custa uma leitura (X4), e cada link simbólico recomeça a busca desde a raiz (X9). O Windows faz o mesmo papel com as caches do gerenciador de objetos e do NTFS. Medimos isso no extra E3: no Windows 11 com NTFS, o `open` levou 27 µs no SSD e 41 µs no HDD, sem variar de 1 a 10 níveis, contra 4,25 a 4,61 ms no simulador. O Linux também limita a quantidade de links simbólicos seguidos (ELOOP): são 40 por resolução, contra o nosso limite de 8.
 
 **Tabelas de arquivos abertos (X5).** No Unix, cada processo tem uma tabela de descritores que aponta para "descrições de arquivo aberto" (`struct file`, com posição e modo), que apontam para o inode compartilhado. No Windows, a tabela de handles do processo aponta para objetos de arquivo, e um bloco de controle por arquivo é compartilhado. É a mesma divisão em dois níveis do X5. Diferença: no Unix, um `fork` faz pai e filho compartilharem a mesma posição, caso que o modelo não simula.
 
@@ -589,7 +610,8 @@ Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80, SCAN 49.996
 ## 5. Limitações do simulador
 
 - **Disco simplificado:** a busca é linear na distância, quando na prática é ~√d para distâncias curtas. A rotação é sempre meia volta (não depende da posição angular), e não há cache no disco nem NCQ. Em discos reais, o próprio dispositivo reordena requisições (NCQ), o que reduz a diferença entre escalonadores do X1/X7. A regra "rotação = 0 só no bloco imediatamente seguinte" exagera o ganho da sequência: explica os 590× do X1 sequencial e os 0,04 ms por nível do X4.
-- **Sem cache no sistema de arquivos:** a camada de blocos não tem cache de diretórios, de inodes nem de índices. Isso infla o custo do `open` (X4), dos links (X9) e da indexada (X11). Na integração (X12), a cache LRU mostrou o quanto isso muda as conclusões.
+- **Sem cache no sistema de arquivos:** a camada de blocos não tem cache de diretórios, de inodes nem de índices. Isso infla o custo do `open` (X4), dos links (X9) e da indexada (X11). Na integração (X12), a cache LRU mostrou o quanto isso muda as conclusões. O extra E3 quantifica a distorção numa máquina real: o `open` leva ~27 µs (SSD) ou ~41 µs (HDD), independentemente da profundidade, cerca de 160 vezes menos que no modelo. As conclusões do X4 e do X9 sobre contagem de acessos valem para o **primeiro** acesso a um caminho (cache fria). Os acessos seguintes quase nunca chegam ao disco.
+- **Metadados no diretório, não num inode:** pela regra do modelo, o `close` de um arquivo sujo grava o bloco do diretório onde ele foi **criado** (`fcb.pai`). Com hard links (X9), isso continua valendo mesmo que o arquivo tenha sido aberto por outro nome, ou que o nome original já tenha sido removido. No Unix, tamanho e datas ficam no inode, separado das entradas de diretório, e um nome a mais não muda onde os metadados são gravados.
 - **Tempo nas cargas de arquivos:** os instantes das operações são fixos (0,5–2 ms entre operações) e não esperam o disco. No X12, isso cria filas irreais de segundos; um processo real esperaria o `read` terminar antes de emitir o próximo.
 - **Write-back simplificado:** sincronização total a cada 5 s, sem limite de sujos nem gravação por idade, o que gera as tempestades do X6/E2 de forma mais intensa que no Linux ou no Windows. O fim da simulação não faz *flush*, por isso o X12 mostra 0 escritas físicas.
 - **Regras literais:** "cursor da encadeada recomeça em i ≤ c" (X11) e "toda revisita é ciclo" (X9) diferem do que sistemas reais fazem. Os números refletem as regras, e discutimos o efeito em cada caso.
@@ -618,6 +640,7 @@ Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80, SCAN 49.996
 - Microsoft — File Caching (lazy writer): https://learn.microsoft.com/en-us/windows/win32/FileIO/file-caching
 - Apple — fsync(2) e F_FULLFSYNC: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html
 - Linux kernel — Pathname lookup (dcache): https://www.kernel.org/doc/Documentation/filesystems/path-lookup.md
+- Linux man-pages — path_resolution(7) (limite de links simbólicos por resolução): https://man7.org/linux/man-pages/man7/path_resolution.7.html
 - Microsoft — Locking and Unlocking Byte Ranges in Files: https://learn.microsoft.com/en-ie/Windows/Win32/fileio/locking-and-unlocking-byte-ranges-in-files
 - Linux man-pages — remoção das travas mandatórias no Linux 5.15: https://lkml.iu.edu/hypermail/linux/kernel/2110.0/00378.html
 - Linux kernel — ext4, The Contents of inode.i_block (blocos indiretos e extents): https://docs.kernel.org/filesystems/ext4/ifork.html
@@ -636,3 +659,4 @@ Maria Julia: proteção e travas (M5), alocação (M6), o bônus do flash, os ex
 | Ferramenta | Finalidade | Onde foi usada (arquivos ou seções) |
 |---|---|---|
 | Claude (Anthropic), Opus 5.5 | Implementação do código a partir das regras do enunciado e dos comentários dos arquivos; testes adicionais; script de experimentos extras; gráficos adicionais; redação inicial do relatório (hipóteses formuladas a partir do Silberschatz, análises e pesquisa sobre sistemas reais) | `simes/es/escalonadores.py`, `simes/es/cpu.py`, `simes/es/cache.py`, `simes/es/buffering.py`, `simes/arquivos/sistema.py`, `simes/arquivos/alocacao.py`, `simes/integracao.py`, `simes/disco.py` (DiscoFlash), `testes/test_grupo.py`, `extras/experimentos_extras.py`, `graficos.py` (gráficos acrescentados), seções 0 a 7 deste relatório |
+| Claude (Anthropic), Opus 5.5 | Revisão final: conferência dos números do relatório contra `resultados/*.csv` e da reprodutibilidade dos experimentos; correção de imprecisões nas análises do X4 e do X9 (a partir de um rastreamento operação a operação das cargas); script e redação do extra E3 (medição real do `open`); explicação do código do N3/M4 para estudo da arguição | `extras/e3_open_real.py`, `resultados/extras/E3_open_real.csv`, `graficos/extras/E3_open_real.png`, seções 1, 3 (X4 e X9), 4, 5, 7 e 8 deste relatório |
