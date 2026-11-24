@@ -1,75 +1,47 @@
-# Trabalho prático 2026/II — SimES: simulador de E/S e de sistema de arquivos
+# SimES — Simulador de E/S e de sistema de arquivos
 
-Sistemas Operacionais · PUCRS · Prof. Filipo Novo Mór · [filipomor.com](https://filipomor.com)
+Trabalho prático 2 da disciplina de Sistemas Operacionais (PUCRS, 2026/II), Prof. Filipo Novo Mór.
 
-O enunciado completo (escopo, regras, entrega e avaliação) é distribuído pelo professor.
-Este README explica como usar o código.
+**Integrantes:** Diogo Giacoboni Gallo, Pedro Augusto Wagner, Elisa Ely de Oliveira Rigotti, Maria Júlia Escobar Correia de Melo
 
-**Entrega: 26/11/2026, até 23h59.** Cada integrante envia o relatório final no Moodle; o código
-fica no repositório público do grupo, citado no relatório.
+Este repositório contém a nossa implementação do SimES, um simulador do caminho de uma requisição de E/S: do sistema de arquivos, passando pelo subsistema de E/S do kernel, até o disco. A partir do código-base fornecido pelo professor, implementamos o núcleo, os seis módulos, a integração ponta a ponta e o bônus de armazenamento flash, e executamos os experimentos X1 a X13. A análise completa está no [RELATORIO.md](RELATORIO.md).
 
-## Requisitos
+## O que foi implementado
 
-- Python 3.8 ou superior, só a biblioteca padrão. Nada exige administrador.
-- Opcional: `matplotlib`, para gerar os gráficos (`pip install --user matplotlib`).
-- No Windows, troquem `python3` por `py` em todos os comandos.
-
-## Primeiros passos
-
-1. No GitHub (ou outro serviço), criem um repositório **público** novo, vazio, só para este trabalho.
-2. Clonem esse repositório e copiem para dentro dele o conteúdo desta pasta:
-
-```bash
-cd Aulas_SisOp && git pull && cd ..                     # atualiza o repositório da disciplina
-git clone https://github.com/<usuario>/<repositorio>.git
-cp -r Aulas_SisOp/Trabalho_IO_2026II/. <repositorio>/   # o "/." copia também o .gitignore
-cd <repositorio>
-git add . && git commit -m "Esqueleto do SimES" && git push
-python3 executar.py testes                              # os testes do núcleo falham até vocês implementarem
-```
-
-## Estrutura
-
-| Caminho | Conteúdo | Vocês alteram? |
+| Parte | Conteúdo | Arquivos principais |
 |---|---|---|
-| `simes/parametros.py` | Parâmetros fixos do modelo (disco, CPU, cache) | Não |
-| `simes/disco.py` | Modelo do disco rígido; `DiscoFlash` (bônus) | Só o bônus |
-| `simes/es/escalonadores.py` | FCFS pronto; SSTF e SCAN (núcleo); C-SCAN, LOOK, C-LOOK, DEADLINE (M2) | Sim |
-| `simes/es/cpu.py` | Custo de CPU: polling e interrupção (núcleo); DMA (M3) | Sim |
-| `simes/es/cache.py` | Cache LRU e FIFO (M1) | Sim |
-| `simes/es/buffering.py` | Buffer simples, duplo e circular (M3) | Sim |
-| `simes/es/simulador.py` | Simulador de E/S por eventos | Não |
-| `simes/arquivos/sistema.py` | Sistema de arquivos: núcleo, links (M4), proteção e travas (M5) | Sim |
-| `simes/arquivos/alocacao.py` | Contígua pronta; encadeada, FAT e indexada (M6) | Sim |
-| `simes/arquivos/estruturas.py`, `camada_bloco.py`, `simulador.py` | FCB, tabelas, acesso a blocos, simulador | Não |
-| `simes/integracao.py` | Integração ponta a ponta (grupos de 4) | Sim |
-| `cargas/` | Cargas padronizadas | Não |
-| `experimentos.py` | Experimentos X1 a X13 | Não |
-| `graficos.py` | Gráficos padrão | Podem acrescentar |
-| `testes/` | Testes automáticos | Podem acrescentar |
-| `RELATORIO.md`, `grupo.json` | Modelo do relatório final e dados do grupo | Preencham |
-| `ferramentas/validar_entrega.py` | Confere a entrega | Não |
+| Núcleo · E/S | Escalonadores SSTF e SCAN; custo de CPU por polling e por interrupção | `simes/es/escalonadores.py`, `simes/es/cpu.py` |
+| Núcleo · Arquivos | Resolução de caminhos, `mkdir`, `create`, `open`, `read`, `write`, `seek`, `close`, `unlink`, tabelas de arquivos abertos | `simes/arquivos/sistema.py` |
+| M1 · Cache de blocos | LRU e FIFO, write-through e write-back, perda numa queda de energia | `simes/es/cache.py` |
+| M2 · Escalonamento avançado | C-SCAN, LOOK, C-LOOK e DEADLINE | `simes/es/escalonadores.py` |
+| M3 · DMA e buffering | Custo do DMA; buffers simples, duplo e circular | `simes/es/cpu.py`, `simes/es/buffering.py` |
+| M4 · Links | Hard links, links simbólicos, ponteiros pendentes e detecção de ciclos | `simes/arquivos/sistema.py` |
+| M5 · Proteção e travas | Bits rwx, ACL, travas consultivas e mandatórias | `simes/arquivos/sistema.py` |
+| M6 · Alocação | Encadeada, FAT e indexada (índice de 2 níveis) | `simes/arquivos/alocacao.py` |
+| Integração | Histórico do sistema de arquivos convertido em requisições que passam pela cache e pelo escalonador | `simes/integracao.py` |
+| Bônus · Flash | `DiscoFlash` com FTL, coleta de lixo e amplificação de escrita | `simes/disco.py` |
 
-Os pontos a implementar estão marcados com `TODO` e lançam `NotImplementedError` até serem
-implementados. As regras de cada um (inclusive as regras de custo do sistema de arquivos)
-estão nos comentários do próprio arquivo.
+Os parâmetros do modelo (`simes/parametros.py`), as cargas (`cargas/`) e os experimentos oficiais (`experimentos.py`) não foram alterados.
 
-## Comandos
+## Como executar
+
+É necessário Python 3.8 ou superior, usando apenas a biblioteca padrão. O `matplotlib` é opcional e só é usado para gerar os gráficos. No Windows, substitua `python3` por `py`.
 
 ```bash
-python3 executar.py testes
-python3 executar.py es --carga cargas/es_aleatoria.txt --escalonador SSTF
-python3 executar.py es --carga cargas/es_reuso.txt --cache LRU --capacidade 512 --escrita write-back --queda 12000
-python3 executar.py arquivos --carga cargas/fs_compilador.txt
-python3 executar.py arquivos --carga cargas/fs_alocacao.txt --alocador indexada --blocos 20000
-python3 executar.py buffering --buffers 2 --producao 2 --consumo 8
+python3 executar.py testes                 # 50 testes (26 fornecidos + 24 nossos)
 python3 executar.py experimentos           # roda X1 a X13 e grava resultados/
 python3 graficos.py                        # gera graficos/ a partir de resultados/
 python3 ferramentas/validar_entrega.py     # confere a entrega
 ```
 
-Os experimentos de módulos não implementados aparecem como `nao_implementado` em
-`resultados/experimentos.csv`; isso é esperado para os módulos que o grupo não escolheu.
+Também é possível rodar uma carga isolada, por exemplo:
+
+```bash
+python3 executar.py es --carga cargas/es_aleatoria.txt --escalonador SSTF
+python3 executar.py es --carga cargas/es_reuso.txt --cache LRU --capacidade 512 --escrita write-back --queda 12000
+python3 executar.py arquivos --carga cargas/fs_alocacao.txt --alocador indexada --blocos 20000
+python3 executar.py buffering --buffers 2 --producao 2 --consumo 8
+```
 
 ## Experimentos
 
@@ -89,28 +61,23 @@ Os experimentos de módulos não implementados aparecem como `nao_implementado` 
 | X12 | integração | Cargas de arquivos passando pela cache e pelo escalonador |
 | X13 | bônus | Armazenamento flash × disco rígido |
 
-## Entrega (até 26/11/2026, 23h59)
+Os resultados oficiais estão em `resultados/*.csv` e os gráficos em `graficos/`.
 
-1. Rodem `python3 executar.py experimentos` e `python3 graficos.py`, e façam commit também de
-   `resultados/` e `graficos/`: o relatório cita esses arquivos como evidência.
-2. Preencham `grupo.json` (nomes completos, link do repositório, módulos escolhidos) e
-   `RELATORIO.md` (no topo: o nome completo de TODOS os integrantes e o link do repositório).
-3. Rodem `python3 ferramentas/validar_entrega.py` até não haver erros, e deem `git push`.
-4. Confiram que o repositório é público: abram o link numa janela anônima do navegador.
-5. Exportem o relatório para PDF (por exemplo: abram o `RELATORIO.md` no GitHub e usem
-   Imprimir → Salvar como PDF).
-6. **Cada integrante** envia o PDF do relatório no Moodle. Só o relatório é enviado; código,
-   resultados e gráficos ficam no repositório.
+Além dos experimentos oficiais, fizemos três experimentos extras, em configuração separada, que gravam em `resultados/extras/` e `graficos/extras/`:
 
-O professor considera o repositório no estado em que estava no prazo de entrega; commits
-posteriores podem ser desconsiderados.
+- **E1** (`extras/experimentos_extras.py`): flash em estado estacionário, com o dispositivo cheio e diferentes áreas de reserva. Complementa o X13.
+- **E2** (`extras/experimentos_extras.py`): picos de latência causados pela sincronização periódica do write-back. Complementa o X6.
+- **E3** (`extras/e3_open_real.py`): tempo real do `open` conforme a profundidade, medido num SSD e num HDD de uma máquina com Windows. Complementa o X4.
 
-## Dados sensíveis
+## Estrutura do repositório
 
-O repositório é público. **Não incluam** matrícula, e-mail, telefone, CPF ou outros dados
-pessoais; senhas, tokens ou chaves de API; arquivos `.env` ou de configuração pessoal. Os nomes
-dos integrantes aparecem no relatório e no `grupo.json`; nada além disso.
-
-O validador procura alguns desses padrões, mas a responsabilidade é do grupo. Se algo sensível
-for parar num commit, apagar o arquivo depois não basta: ele continua no histórico do git.
-Troquem a senha ou o token imediatamente e, se for o caso, recriem o repositório.
+| Caminho | Conteúdo |
+|---|---|
+| `simes/` | Código do simulador (dispositivo, subsistema de E/S, sistema de arquivos, integração) |
+| `cargas/` | Cargas de trabalho padronizadas |
+| `experimentos.py`, `executar.py`, `graficos.py` | Experimentos oficiais, linha de comando e gráficos |
+| `testes/` | Testes automáticos fornecidos e testes do grupo (`test_grupo.py`) |
+| `extras/` | Experimentos extras E1, E2 e E3 |
+| `resultados/`, `graficos/` | Resultados e gráficos usados como evidência no relatório |
+| `RELATORIO.md`, `grupo.json` | Relatório final e dados do grupo |
+| `ferramentas/validar_entrega.py` | Validador da entrega fornecido pelo professor |

@@ -1,15 +1,18 @@
 # Relatório — SimES: simulador de E/S e de sistema de arquivos
 
-**Integrantes:** Diogo Gallo, Pedro Wagner, Elisa Rigotti, Maria Julia
+**Integrantes:** Diogo Giacoboni Gallo, Pedro Augusto Wagner, Elisa Ely de Oliveira Rigotti, Maria Júlia Escobar Correia de Melo
 
 **Repositório:** https://github.com/dgiacoboni01/T2-SISOP-2026-2
 
 ## 0. Resumo
 
-Implementamos todo o SimES: o núcleo (SSTF, SCAN, custo de CPU por polling e por interrupção, sistema de arquivos com tabelas de arquivos abertos e `unlink` adiado), os seis módulos (M1 cache LRU/FIFO, M2 C-SCAN/LOOK/C-LOOK/DEADLINE, M3 DMA e buffering, M4 links, M5 proteção e travas, M6 alocação encadeada/FAT/indexada), a integração ponta a ponta e o bônus de armazenamento flash (FTL em log com coleta de lixo gulosa). Os 50 testes passam (26 fornecidos e 24 nossos), e os 13 experimentos rodam. Os três resultados mais importantes:
-(1) Num disco rígido, o que pesa é a latência rotacional, não o deslocamento do braço. SSTF/SCAN cortam o deslocamento em até 16 vezes nas rajadas, mas a resposta cai só 45%. A maior vitória é manter a sequência física, que zera a rotação: no X1 sequencial, FCFS leva 10,2 s de resposta média e SSTF leva 17 ms.
-(2) Com write-back, a sincronização periódica despeja de uma vez os blocos sujos e cria "tempestades" de escrita. As leituras que chegam logo depois esperam 14 vezes mais (X6 + extra E2). E uma queda de energia perde até 55 blocos.
-(3) Os metadados ditam o desempenho: o índice relido a cada acesso faz a alocação indexada ficar 2,7 vezes mais lenta que a contígua na integração. Com uma cache LRU, os blocos de índice ficam quentes e a diferença praticamente some (X11, X12).
+Este trabalho implementa o SimES completo. No núcleo, desenvolvemos os escalonadores SSTF e SCAN, o custo de CPU por polling e por interrupção e o sistema de arquivos, com tabelas de arquivos abertos e `unlink` adiado. Também implementamos os seis módulos (M1 cache LRU/FIFO, M2 C-SCAN/LOOK/C-LOOK/DEADLINE, M3 DMA e buffering, M4 links, M5 proteção e travas, M6 alocação encadeada/FAT/indexada), a integração ponta a ponta e o bônus de armazenamento flash, com uma FTL em log e coleta de lixo gulosa. Os 50 testes passam (26 fornecidos e 24 escritos pelo grupo) e os 13 experimentos foram executados.
+
+Três resultados se destacaram. O primeiro é que, no disco rígido, a latência rotacional pesa mais que o deslocamento do braço. Nas rajadas, SSTF e SCAN reduziram o deslocamento em até 16 vezes, mas a resposta média caiu apenas 45%. O maior ganho ocorre quando a ordem de atendimento preserva a sequência física dos blocos, o que elimina a rotação: no X1 sequencial, a resposta média foi de 10,2 s com FCFS e de 17 ms com SSTF.
+
+O segundo resultado diz respeito ao write-back. A sincronização periódica envia de uma vez todos os blocos sujos ao disco e forma rajadas de escrita, e as leituras que chegam logo depois esperam 14 vezes mais que as demais (X6 e extra E2). Além disso, uma queda de energia chegou a perder 55 blocos.
+
+O terceiro é o peso dos metadados. Como o bloco de índice é relido a cada acesso, a alocação indexada ficou 2,7 vezes mais lenta que a contígua na integração. Com uma cache LRU, os blocos de índice permanecem na memória e essa diferença praticamente desaparece (X11 e X12).
 
 ## 1. Escopo realizado
 
@@ -28,9 +31,9 @@ Implementamos todo o SimES: o núcleo (SSTF, SCAN, custo de CPU por polling e po
 | Integração ponta a ponta | completo | histórico do sistema de arquivos → cache → escalonador (X12) |
 | Bônus flash | completo | `DiscoFlash` com FTL, coleta de lixo e amplificação de escrita (X13 + extra E1) |
 
-Resultado dos testes automáticos (`python3 executar.py testes`): `Ran 50 tests in 0.085s — OK` (nenhum teste pulado; 24 dos 50 testes são nossos, em `testes/test_grupo.py`).
+Resultado dos testes automáticos (`python3 executar.py testes`): `Ran 50 tests in 0.085s — OK`. Nenhum teste foi pulado, e 24 dos 50 testes foram escritos pelo grupo, em `testes/test_grupo.py`.
 
-Experimentos extras (declarados, em configuração separada): `extras/experimentos_extras.py` (E1 e E2, simulados) e `extras/e3_open_real.py` (E3, medição do `open` numa máquina real, que complementa o X4) gravam em `resultados/extras/` e `graficos/extras/`. Não alteram `parametros.py`, as cargas nem `experimentos.py`; os resultados oficiais são os de `resultados/*.csv`.
+Também realizamos experimentos extras, em configuração separada. O script `extras/experimentos_extras.py` contém E1 e E2, que são simulados, e `extras/e3_open_real.py` contém E3, uma medição do `open` numa máquina real que complementa o X4. Esses scripts gravam em `resultados/extras/` e `graficos/extras/` e não alteram `parametros.py`, as cargas nem `experimentos.py`. Os resultados oficiais continuam sendo os de `resultados/*.csv`.
 
 ## 2. Implementação
 
@@ -38,116 +41,115 @@ Experimentos extras (declarados, em configuração separada): `extras/experiment
 
 **Onde:** `simes/es/escalonadores.py` (`SSTF`, `SCAN` e as funções auxiliares `_mais_proxima`, `_a_frente`, `_direcao_do_movimento`); `simes/es/cpu.py` (`custo_cpu`).
 
-**Decisões:** Todos os escalonadores usam um único auxiliar, `_mais_proxima(fila, cabeca, filtro)`, que percorre a fila na ordem de chegada e só troca de candidata quando a distância é *estritamente* menor. Assim, a regra de empate (vence a que chegou antes) vale automaticamente. O filtro `_a_frente` implementa a regra comum de que uma requisição no mesmo cilindro da cabeça está "à frente" nas duas direções.
-- **SSTF:** escolhe a mais próxima sem filtro. A direção devolvida é a do movimento (+1/−1), ou a atual se o alvo está no mesmo cilindro.
-- **SCAN:** procura a mais próxima à frente. Se não houver, devolve `passar_por=[borda]` (0 ou `max_cilindro`), inverte a direção e escolhe a mais próxima *a partir da borda* na nova direção, que é a mesma requisição que estaria mais perto da cabeça entre as de trás.
-- **Polling:** custa `duracao_ms` (espera ocupada durante todo o atendimento). **Interrupção:** custa `n_blocos × (CUSTO_INTERRUPCAO_MS + CUSTO_COPIA_MS_POR_BLOCO)`.
+**Decisões:** Todos os escalonadores usam a mesma função auxiliar, `_mais_proxima(fila, cabeca, filtro)`. Ela percorre a fila na ordem de chegada e só troca de candidata quando encontra uma distância estritamente menor, de modo que a regra de desempate (vence a requisição mais antiga) é respeitada sem código adicional. O filtro `_a_frente` implementa a regra de que uma requisição no mesmo cilindro da cabeça está à frente nas duas direções.
 
-**Dificuldades:** No SCAN, a dúvida era a partir de onde medir a "mais próxima" depois de inverter. Medir da borda e medir da cabeça dão a mesma escolha, porque depois da inversão todas as requisições estão do mesmo lado. Conferimos com o exemplo do livro: 236 cilindros descendo e 331 subindo, com borda em 199.
+O SSTF escolhe a requisição mais próxima sem aplicar filtro e devolve como direção o sentido do movimento (+1 ou −1), ou mantém a direção atual quando o alvo está no mesmo cilindro. O SCAN procura a mais próxima à frente. Quando não há nenhuma, ele devolve `passar_por=[borda]` (0 ou `max_cilindro`), inverte a direção e escolhe a mais próxima a partir da borda, que coincide com a mais próxima da cabeça entre as que ficaram para trás.
+
+Quanto ao custo de CPU, o polling custa `duracao_ms`, já que a CPU fica em espera ocupada durante todo o atendimento, e a interrupção custa `n_blocos × (CUSTO_INTERRUPCAO_MS + CUSTO_COPIA_MS_POR_BLOCO)`.
+
+**Dificuldades:** No SCAN, tivemos dúvida sobre o ponto de referência para medir a requisição mais próxima depois da inversão. Medir a partir da borda ou a partir da cabeça leva à mesma escolha, porque após a inversão todas as requisições ficam do mesmo lado. Conferimos o resultado com o exemplo do livro, que dá 236 cilindros descendo e 331 subindo, com borda em 199.
 
 ### N3 — Sistema de arquivos
 
 **Onde:** `simes/arquivos/sistema.py`: `_resolver_partes`, `_pai_e_nome`, `_criar_entrada`, `resolver`, `mkdir`, `create`, `open`, `read`, `write`, `seek`, `close`, `unlink`.
 
-**Decisões:**
-- **Resolução de caminhos (`_resolver_partes`):** antes de procurar cada componente, lê o diretório onde ele está (1 leitura). Por isso `/a/b/c` custa 3 leituras e `/` não custa nada. Componente ausente dá ENOENT; atravessar um arquivo dá ENOTDIR. Toda operação que cria ou remove uma entrada usa `_pai_e_nome`, que resolve o pai como o `resolver` e depois lê o próprio pai: é o "até o pai, inclusive" das regras (`create /a/b/f.txt` custa 3 leituras).
-- **mkdir/create:** alocam pelo alocador (1 bloco para diretório, `ceil(tamanho/4096)` para arquivo), aplicam os extras do alocador e gravam o(s) bloco(s) de diretório exigido(s). Se o alocador lança ENOSPC, o FCB recém-criado é descartado, para não deixar FCB órfão.
-- **Tabelas de arquivos abertos:** `tabela_global[fcb_id]` guarda uma `EntradaGlobal` com `contador`; `tabelas_processo[proc][handle]` guarda uma `EntradaProcesso` com modo e posição. Dois processos que abrem o mesmo arquivo compartilham a entrada global (contador 2) e têm posições independentes. Abrir um *handle* que o processo já usa dá EINVAL. Quando a tabela de um processo esvazia, ela é removida.
-- **read/write:** calculam os blocos lógicos do intervalo `[posição, posição+n)` (em `read`, limitado ao tamanho). O `write` primeiro estende o arquivo com `alocador.estender` se faltarem blocos e depois grava. O modo `'a'` reposiciona no fim antes de cada escrita, como `O_APPEND`. Toda escrita marca o FCB como sujo; o `close` grava então o bloco do diretório pai (1 escrita).
-- **unlink com arquivo aberto:** remove a entrada e grava o pai. `links` cai e, se chegar a 0, os blocos só são liberados se não houver entrada na tabela global. Caso contrário, quem libera é o `close` que zerar o contador. Se esse arquivo removido estiver sujo, o `close` não grava o pai, porque o arquivo já não tem entrada de diretório.
-- `unlink` de diretório dá EISDIR, como no Linux.
+**Decisões:** Na resolução de caminhos (`_resolver_partes`), cada componente exige a leitura do diretório que o contém. Assim, `/a/b/c` custa 3 leituras e `/` não custa nenhuma. Um componente ausente gera ENOENT, e tentar atravessar um arquivo gera ENOTDIR. As operações que criam ou removem entradas usam `_pai_e_nome`, que resolve o pai da mesma forma que `resolver` e em seguida lê o próprio pai. Isso corresponde ao "até o pai, inclusive" das regras; por exemplo, `create /a/b/f.txt` custa 3 leituras.
 
-**Dificuldades:** O ponto delicado foi o custo exato de cada operação. Por exemplo, o `open` não escreve nada, e o `close` só escreve se houve escrita. Os testes do núcleo conferem cada um desses custos.
+As operações `mkdir` e `create` alocam pelo alocador (1 bloco para diretório e `ceil(tamanho/4096)` para arquivo), aplicam os extras do alocador e gravam os blocos de diretório exigidos. Se o alocador lançar ENOSPC, o FCB recém-criado é descartado para não deixar um FCB órfão.
+
+Para as tabelas de arquivos abertos, `tabela_global[fcb_id]` guarda uma `EntradaGlobal` com o contador de aberturas, e `tabelas_processo[proc][handle]` guarda uma `EntradaProcesso` com modo e posição. Quando dois processos abrem o mesmo arquivo, eles compartilham a entrada global (contador 2) e mantêm posições independentes. Abrir um handle que o processo já usa gera EINVAL, e a tabela de um processo é removida quando fica vazia.
+
+As operações `read` e `write` calculam os blocos lógicos do intervalo `[posição, posição+n)`, sendo que no `read` o intervalo é limitado ao tamanho do arquivo. O `write` primeiro estende o arquivo com `alocador.estender`, se faltarem blocos, e depois grava. No modo `'a'`, a posição é levada ao fim antes de cada escrita, como em `O_APPEND`. Toda escrita marca o FCB como sujo, e o `close` então grava o bloco do diretório pai (1 escrita).
+
+No `unlink` de um arquivo aberto, a entrada é removida e o pai é gravado. O contador `links` é decrementado e, se chegar a zero, os blocos só são liberados quando não houver entrada na tabela global; caso contrário, a liberação fica para o `close` que zerar o contador. Se o arquivo removido estiver sujo, esse `close` não grava o pai, porque o arquivo já não possui entrada de diretório. O `unlink` de um diretório gera EISDIR, como no Linux.
+
+**Dificuldades:** A parte mais trabalhosa foi acertar o custo exato de cada operação. O `open`, por exemplo, não escreve nada, e o `close` só escreve se houve escrita no arquivo. Os testes do núcleo conferem cada um desses custos.
 
 ### M1 — Cache de blocos
 
 **Onde:** `simes/es/cache.py` (`_CacheOrdenada`, `CacheLRU`, `CacheFIFO`).
 
-**Decisões:** Uma base comum guarda um `OrderedDict` bloco → sujo, cuja ordem é a ordem de expulsão (a vítima é o primeiro item). A LRU chama `move_to_end` em todo acerto e em toda escrita; a FIFO não reordena nunca. No write-through, `escrever` devolve `[bloco]` e o bloco nunca fica sujo. No write-back, o bloco é marcado como sujo e só vai ao disco quando é expulso ou no `sincronizar`. A expulsão devolve apenas as vítimas sujas.
+**Decisões:** As duas caches compartilham uma classe base que guarda um `OrderedDict` de bloco para estado sujo. A ordem do dicionário é a ordem de expulsão, e a vítima é sempre o primeiro item. A LRU chama `move_to_end` a cada acerto e a cada escrita, enquanto a FIFO nunca reordena. No write-through, `escrever` devolve `[bloco]` e o bloco nunca fica sujo. No write-back, o bloco é marcado como sujo e só vai ao disco quando é expulso ou quando ocorre o `sincronizar`. A expulsão devolve apenas as vítimas sujas.
 
-**Dificuldades:** Uma regravação de um bloco que já está na cache não pode expulsar ninguém. Há um teste nosso para isso.
+**Dificuldades:** Regravar um bloco que já está na cache não pode provocar expulsão. Escrevemos um teste específico para esse caso.
 
 ### M2 — Escalonamento avançado
 
 **Onde:** `simes/es/escalonadores.py` (`CSCAN`, `LOOK`, `CLOOK`, `Deadline`).
 
-**Decisões:** O C-SCAN sem requisições à frente devolve `passar_por=[max_cilindro, 0]`, de modo que o retorno conta como deslocamento. O LOOK inverte onde está. O C-LOOK salta para a requisição de menor cilindro (empate: a mais antiga). O DEADLINE procura a requisição vencida (`agora >= prazo`) de prazo mais antigo e mantém a direção; sem nenhuma vencida, delega ao SSTF. Os valores do livro conferem: C-SCAN 382, LOOK 299 e C-LOOK 322.
+**Decisões:** Quando não há requisições à frente, o C-SCAN devolve `passar_por=[max_cilindro, 0]`, de modo que o retorno ao início é contado como deslocamento. O LOOK inverte a direção no ponto onde está. O C-LOOK salta para a requisição de menor cilindro, com desempate pela mais antiga. O DEADLINE procura, entre as requisições vencidas (`agora >= prazo`), a de prazo mais antigo e mantém a direção; quando nenhuma está vencida, a decisão é delegada ao SSTF. Os valores do livro foram reproduzidos: C-SCAN 382, LOOK 299 e C-LOOK 322.
 
-**Dificuldades:** Nenhuma relevante.
+**Dificuldades:** Não houve dificuldades relevantes.
 
 ### M3 — DMA e buffering
 
 **Onde:** `simes/es/cpu.py` (modo `dma`) e `simes/es/buffering.py`.
 
-**Decisões:** O DMA custa `CUSTO_PROGRAMAR_DMA_MS + CUSTO_INTERRUPCAO_MS`, qualquer que seja o tamanho. O buffering é uma recorrência direta das regras: o bloco *k* começa a ser gerado em `max(fim_produção[k−1], fim_gravação[k−n])`, a espera entra em `bloqueio_produtor_ms` e a gravação começa em `max(fim_produção[k], fim_gravação[k−1])`.
+**Decisões:** O DMA custa `CUSTO_PROGRAMAR_DMA_MS + CUSTO_INTERRUPCAO_MS`, independentemente do tamanho da requisição. O buffering foi implementado como uma recorrência que segue diretamente as regras: a produção do bloco *k* começa em `max(fim_produção[k−1], fim_gravação[k−n])`, a espera é somada a `bloqueio_produtor_ms` e a gravação começa em `max(fim_produção[k], fim_gravação[k−1])`.
 
-**Dificuldades:** Nenhuma relevante; os testes de 1 e 2 buffers conferem com fórmulas fechadas.
+**Dificuldades:** Não houve dificuldades relevantes. Os testes com 1 e 2 buffers conferem com as fórmulas fechadas.
 
 ### M4 — Links e compartilhamento
 
 **Onde:** `simes/arquivos/sistema.py` (`_resolver_partes`, `link`, `symlink`, `percorrer`).
 
-**Decisões:**
-- **Link simbólico na resolução:** quando um componente é simbólico (e não é o último ou `seguir_simbolico=True`), os componentes do alvo substituem o link no início da lista de pendentes e a busca recomeça da raiz, pagando de novo a leitura dos diretórios do alvo. Mais de 8 links seguidos dá ELOOP.
-- **Link pendente:** para distinguir um link pendente de um ENOENT comum, contamos quantos dos próximos componentes vieram de um alvo. Se o nome ausente veio de um alvo, o erro sai marcado (`pendente=True`), e o `open` conta `links_pendentes`.
-- **Hard link:** `link` não segue o link simbólico do último componente (como o `link()` do Linux), recusa diretórios com EPERM e incrementa `links`.
-- **`percorrer`:** é uma DFS com um conjunto `visitados` por travessia. Revisitar um diretório conta `ciclos_detectados` e não desce. Links simbólicos são seguidos como no `find -L`: alvo inexistente conta `links_pendentes`, e alvo em laço conta `links_em_laco`, um indicador nosso.
+**Decisões:** Durante a resolução, quando um componente é um link simbólico (e não é o último componente, ou `seguir_simbolico=True`), os componentes do alvo substituem o link no início da lista de pendentes e a busca recomeça pela raiz, pagando novamente a leitura dos diretórios do alvo. Mais de 8 links seguidos geram ELOOP.
 
-**Dificuldades:** Pela regra do enunciado, toda revisita conta como "ciclo", inclusive chegar a `/atalhos` pela segunda vez sem que exista laço. Discutimos isso no X9.
+Para distinguir um link pendente de um ENOENT comum, contamos quantos dos próximos componentes vieram de um alvo. Se o nome ausente veio de um alvo, o erro é marcado com `pendente=True` e o `open` incrementa `links_pendentes`.
+
+O `link` não segue um link simbólico no último componente, como o `link()` do Linux, recusa diretórios com EPERM e incrementa `links`. O `percorrer` é uma busca em profundidade com um conjunto `visitados` por travessia. Revisitar um diretório incrementa `ciclos_detectados` e interrompe a descida. Os links simbólicos são seguidos como no `find -L`: um alvo inexistente conta em `links_pendentes` e um alvo em laço conta em `links_em_laco`, indicador que acrescentamos.
+
+**Dificuldades:** Pela regra do enunciado, qualquer revisita conta como ciclo, inclusive chegar a `/atalhos` pela segunda vez sem que haja laço. Esse ponto é discutido no X9.
 
 ### M5 — Proteção e travas
 
-**Onde:** `simes/arquivos/sistema.py` (`_verificar_permissao`, `_verificar_trava`, `usuario`, `chmod`, `setacl`, `lock`, `unlock`). Os dois ganchos são redefinidos na seção do M5 da própria classe e, por virem depois, substituem as versões vazias.
+**Onde:** `simes/arquivos/sistema.py` (`_verificar_permissao`, `_verificar_trava`, `usuario`, `chmod`, `setacl`, `lock`, `unlock`). Os dois ganchos são redefinidos na seção do M5 da própria classe e, por aparecerem depois, substituem as versões vazias.
 
-**Decisões:**
-- **Verificação de permissão:** root sempre passa (conta 1). Se a ACL tem entrada para o usuário, vale a primeira, e a posição dela é somada a `verificacoes`. Senão, valem os bits do dono ou de "outros", e soma-se `len(acl)+1`.
-- **chmod:** aceita `'640'` (texto) e `640` (o simulador converte argumentos numéricos em `int`), sempre interpretando em octal.
-- **Travas:** com bloqueio consultivo, ler ou escrever um arquivo travado por outro processo só conta uma violação. Com bloqueio mandatório, dá EBUSY. O `close` do dono libera a trava, como o `fcntl` do POSIX, que solta as travas do processo em qualquer `close`. Destravar sem ser o dono não faz nada.
+**Decisões:** Na verificação de permissão, o root sempre passa e conta uma verificação. Se a ACL tem uma entrada para o usuário, vale a primeira, e a posição dela é somada a `verificacoes`. Caso contrário, valem os bits do dono ou de "outros", e soma-se `len(acl)+1`.
 
-**Dificuldades:** A conversão automática de `'600'` para o inteiro 600 pelo simulador, que, sem tratamento, viraria 0o1130.
+O `chmod` aceita `'640'` como texto e `640` como número (o simulador converte argumentos numéricos para `int`), e sempre interpreta o valor em octal.
+
+Com bloqueio consultivo, ler ou escrever um arquivo travado por outro processo apenas registra uma violação. Com bloqueio mandatório, a operação falha com EBUSY. O `close` do dono libera a trava, como no `fcntl` do POSIX, que solta as travas do processo em qualquer `close`. Um `unlock` feito por quem não é o dono não tem efeito.
+
+**Dificuldades:** O simulador converte automaticamente `'600'` para o inteiro 600, que sem tratamento seria interpretado como 0o1130.
 
 ### M6 — Alocação em disco
 
 **Onde:** `simes/arquivos/alocacao.py` (`AlocadorEncadeado`, `AlocadorFAT`, `AlocadorIndexado`).
 
-**Decisões:**
-- **Encadeada:** usa `primeiros_livres`. `estender` devolve 1 escrita no antigo último bloco. `bloco_fisico` segue a regra do cursor ao pé da letra: se *i* ≤ cursor, recomeça do bloco 0.
-- **FAT:** herda a alocação da encadeada, mas não tem extras.
-- **Indexada:** precisa de `1` bloco de índice, ou de `1 + ceil(n/1024)` quando *n* > 1024. Ao estender de 1 para 2 níveis, o índice antigo passa a ser o de 1º nível e os novos são de 2º nível. Os extras são uma escrita por bloco de índice. Acrescentamos o indicador `blocos_indice`.
+**Decisões:** A alocação encadeada usa `primeiros_livres`. O `estender` devolve 1 escrita no antigo último bloco, e `bloco_fisico` segue literalmente a regra do cursor: se *i* ≤ cursor, a busca recomeça do bloco 0. A FAT herda a alocação da encadeada, mas não tem extras. A indexada precisa de 1 bloco de índice, ou de `1 + ceil(n/1024)` quando *n* > 1024. Ao passar de 1 para 2 níveis, o índice antigo se torna o de 1º nível e os novos são de 2º nível. Os extras correspondem a uma escrita por bloco de índice, e acrescentamos o indicador `blocos_indice`.
 
-**Dificuldades:** A regra "i ≤ cursor recomeça" penaliza escritas desalinhadas em modo acréscimo: cada `write` de 4 KiB toca de novo o bloco do cursor e relê a corrente inteira. Mantivemos a regra (todos os grupos devem obter os mesmos números) e analisamos o efeito no X11.
+**Dificuldades:** A regra de recomeçar quando i ≤ cursor penaliza escritas desalinhadas em modo acréscimo, porque cada `write` de 4 KiB volta ao bloco do cursor e relê a corrente inteira. Mantivemos a regra, para que todos os grupos obtenham os mesmos números, e analisamos o efeito no X11.
 
 ### Integração ponta a ponta
 
 **Onde:** `simes/integracao.py`.
 
-**Decisões:** Ordenamos o histórico pelo instante com `sorted`, que é estável. Assim, os acessos da mesma operação (mesmo instante) mantêm a ordem em que o sistema de arquivos os emitiu. Os ids são 0, 1, 2…
+**Decisões:** O histórico é ordenado pelo instante com `sorted`, que é estável. Com isso, os acessos de uma mesma operação (mesmo instante) mantêm a ordem em que o sistema de arquivos os emitiu. Os identificadores são 0, 1, 2 e assim por diante.
 
-**Dificuldades:** Nenhuma relevante.
+**Dificuldades:** Não houve dificuldades relevantes.
 
 ### Bônus — DiscoFlash
 
 **Onde:** `simes/disco.py` (`DiscoFlash`).
 
-**Decisões:**
-- **FTL em log:** um mapa lógico → físico (dicionário esparso) e o mapa reverso por página física. Cada bloco apagável tem um contador de páginas válidas e um contador de desgaste.
-- **Gravação:** toda gravação vai para a próxima página livre do bloco ativo e invalida a página antiga.
-- **Coleta de lixo:** quando sobram até 2 blocos apagados (reserva), a coleta gulosa escolhe o bloco cheio com menos páginas válidas (empate: o menos desgastado), copia as válidas (leitura + programação) e apaga o bloco. O tempo da coleta é cobrado da gravação que a disparou.
-- **Leitura:** custa `n × 0,025 ms`.
-- **Área física:** `ceil(320.000 × 1,07)` páginas, arredondada para blocos de 64 páginas (5.350 blocos).
-- **Extras:** `preencher()` envelhece o dispositivo, mas só é usado no experimento extra E1. Expomos também `cilindros`, porque o simulador de E/S consulta esse atributo.
+**Decisões:** A FTL funciona como um log. Ela mantém um mapa lógico → físico (um dicionário esparso) e o mapa reverso por página física, e cada bloco apagável tem um contador de páginas válidas e um contador de desgaste. Toda gravação vai para a próxima página livre do bloco ativo e invalida a página antiga.
 
-**Dificuldades:** Garantir que a coleta nunca fica sem página livre no meio da cópia; a reserva de 2 blocos garante isso. Há um teste que confere que nenhum dado se perde depois de milhares de coletas.
+Quando restam até 2 blocos apagados (a reserva), a coleta gulosa escolhe o bloco cheio com menos páginas válidas, com desempate pelo menos desgastado, copia as páginas válidas (leitura e programação) e apaga o bloco. O tempo da coleta é cobrado da gravação que a disparou. A leitura custa `n × 0,025 ms`. A área física tem `ceil(320.000 × 1,07)` páginas, arredondada para blocos de 64 páginas, o que dá 5.350 blocos.
+
+O método `preencher()` envelhece o dispositivo e é usado apenas no experimento extra E1. Também expomos o atributo `cilindros`, porque o simulador de E/S o consulta.
+
+**Dificuldades:** Foi preciso garantir que a coleta nunca ficasse sem página livre no meio de uma cópia, e a reserva de 2 blocos resolve isso. Um dos testes confere que nenhum dado se perde depois de milhares de coletas.
 
 ## 3. Experimentos
 
-Todos os tempos estão em ms. "Resposta" é o intervalo entre a chegada e o fim do atendimento; "espera" é o intervalo entre a chegada e o início. A taxa de ocupação do disco foi estimada pela % de CPU do polling no X2 (no polling, a CPU fica ocupada exatamente enquanto o disco trabalha).
+Todos os tempos estão em ms. Chamamos de resposta o intervalo entre a chegada e o fim do atendimento, e de espera o intervalo entre a chegada e o início. A ocupação do disco foi estimada pela porcentagem de CPU do polling no X2, já que no polling a CPU fica ocupada exatamente enquanto o disco trabalha.
 
 ### X1 — Escalonadores sob quatro padrões de carga
 
 **Hipótese:** SSTF e SCAN terão deslocamento e resposta média bem menores que o FCFS nas cargas com fila (sequencial e rajadas) e ganho pequeno na aleatória e na concentrada, onde a fila é curta. O SSTF terá a menor resposta média e a maior espera máxima (inanição). O SCAN terá espera máxima menor que o SSTF.
 
-**Fundamentação:** Silberschatz §10.4: o FCFS é justo mas não otimiza o movimento do braço; o SSTF é guloso e pode causar inanição; o SCAN limita a espera a cerca de duas varreduras. Pelo modelo (`parametros.py`), cada acesso fora de sequência paga 1 ms de busca mínima + 0,003 ms/cilindro + 4,17 ms de rotação. O ganho de reordenar depende de haver fila para reordenar.
+**Fundamentação:** Silberschatz §10.4: o FCFS é justo, mas não otimiza o movimento do braço; o SSTF é guloso e pode causar inanição; o SCAN limita a espera a cerca de duas varreduras. Pelo modelo (`parametros.py`), cada acesso fora de sequência paga 1 ms de busca mínima, mais 0,003 ms por cilindro e 4,17 ms de rotação. O ganho de reordenar depende de haver fila para reordenar.
 
 **Configuração:** 4 cargas padronizadas (2.000 requisições de 8 blocos, 70% de leituras, chegadas exponenciais com média de 12 ms; nas rajadas, 50 requisições a cada 600 ms), sempre no disco rígido, em modo interrupção, com FCFS, SSTF e SCAN.
 
@@ -171,21 +173,24 @@ Todos os tempos estão em ms. "Resposta" é o intervalo entre a chegada e o fim 
 **Evidências:** resultados/es.csv (experimento=X1); graficos/X1_resposta_media_ms.png; graficos/X1_espera_max_ms.png; graficos/X1_deslocamento_total.png; resultados/es.csv (experimento=X2, ocupação do disco).
 
 **Análise:**
-- **Sequencial:** o FCFS colapsa. Os processos P1 (cilindro ≈312) e P2 (≈3.906) se alternam, então cada requisição atravessa ~3.600 cilindros e paga 1 + 10,8 + 4,17 + 0,32 ≈ 16,3 ms. Como chega uma requisição a cada 6 ms em média, o disco satura: ocupação de 99,998% no X2, e as chegadas terminam em 11,9 s, mas o disco só termina em 32,5 s. Com SSTF ou SCAN, o braço fica num dos fluxos, e cada requisição seguinte começa no bloco seguinte ao último transferido, o que pela regra do modelo **elimina a latência rotacional** (0,32 ms por requisição). A resposta cai 590 vezes. O ganho vem da sequência física, não da distância percorrida: o deslocamento cai só 3 vezes.
-- **Rajadas:** o deslocamento cai 16 vezes, mas a resposta só 45%. Com 50 requisições ordenadas pela superfície, a distância média é de ~100 cilindros (0,3 ms de busca), mas cada uma ainda paga 1 ms de busca mínima + 4,17 ms de rotação + 0,32 ms: ≈5,8 ms contra ≈10,5 ms no FCFS. A razão 5,8/10,5 = 0,55 bate com 147,5/267,0 = 0,55. **Num disco rígido, a rotação e o custo fixo da busca limitam o que qualquer escalonador consegue.**
-- **Aleatória e concentrada:** a fila é curta (ocupação de ~86%). O SSTF melhora a média, mas na concentrada a espera máxima piora em relação ao FCFS (130,5 contra 96,0): é a inanição prevista, com requisições fora da zona quente (20% inicial do disco, que recebe 80% dos acessos) sendo preteridas.
-- **SCAN:** na concentrada e na aleatória, o SCAN percorre *mais* cilindros que o FCFS. Com a fila quase vazia, sempre que não há nada à frente, a regra do SCAN obriga o braço a ir até a borda (cilindro 4.999 ou 0), mesmo com 80% das requisições perto do cilindro 0. É exatamente o defeito que o LOOK corrige (X7).
-- **Vazão:** é igual entre os escalonadores sempre que o disco não satura, porque é ditada pela taxa de chegada.
+
+Na carga sequencial, o FCFS apresentou o pior desempenho de todo o experimento. Os processos P1 (por volta do cilindro 312) e P2 (por volta do cilindro 3.906) se alternam na fila, de modo que cada requisição atravessa cerca de 3.600 cilindros e custa aproximadamente 1 + 10,8 + 4,17 + 0,32 ≈ 16,3 ms. Como chega uma requisição a cada 6 ms em média, o disco satura: o X2 indica ocupação de 99,998%, e embora as chegadas terminem em 11,9 s, o disco só conclui o atendimento em 32,5 s. Com SSTF ou SCAN, o braço permanece em um dos fluxos e cada requisição começa no bloco seguinte ao último transferido. Pela regra do modelo, isso elimina a latência rotacional e deixa apenas os 0,32 ms de transferência. A resposta cai 590 vezes, enquanto o deslocamento cai só 3 vezes, o que mostra que o ganho vem da sequência física e não da distância percorrida.
+
+Nas rajadas, o deslocamento caiu 16 vezes, mas a resposta apenas 45%. Com 50 requisições ordenadas pela superfície, a distância média entre elas fica em torno de 100 cilindros (0,3 ms de busca), mas cada uma ainda paga 1 ms de busca mínima, 4,17 ms de rotação e 0,32 ms de transferência, o que dá cerca de 5,8 ms, contra cerca de 10,5 ms no FCFS. A razão 5,8/10,5 = 0,55 coincide com a razão medida, 147,5/267,0 = 0,55. Concluímos que, num disco rígido, a rotação e o custo fixo da busca limitam o ganho que qualquer escalonador pode obter.
+
+Nas cargas aleatória e concentrada, a fila é curta (ocupação de cerca de 86%). O SSTF melhora a resposta média, mas na carga concentrada a espera máxima piora em relação ao FCFS (130,5 contra 96,0 ms). Trata-se da inanição prevista na hipótese: as requisições fora da zona quente (os 20% iniciais do disco, que recebem 80% dos acessos) acabam sendo preteridas.
+
+O SCAN percorreu mais cilindros que o FCFS nas cargas concentrada e aleatória. Com a fila quase vazia, sempre que não há requisições à frente, a regra do SCAN obriga o braço a ir até a borda (cilindro 4.999 ou 0), mesmo com 80% das requisições perto do cilindro 0. Esse é justamente o problema que o LOOK resolve, como se vê no X7. Por fim, a vazão foi praticamente igual entre os escalonadores sempre que o disco não saturou, já que nesses casos ela é determinada pela taxa de chegada.
 
 **Veredito:** PARCIALMENTE CONFIRMADA
 
 ### X2 — Polling × interrupção conforme o dispositivo
 
-**Hipótese:** No disco rígido, o polling gastará uma fração de CPU próxima da ocupação do disco (dezenas de %), e a interrupção, ~1%. No dispositivo rápido, o polling ficará competitivo e poderá até gastar menos CPU que a interrupção.
+**Hipótese:** No disco rígido, o polling gastará uma fração de CPU próxima da ocupação do disco (dezenas de %), e a interrupção, cerca de 1%. No dispositivo rápido, o polling ficará competitivo e poderá até gastar menos CPU que a interrupção.
 
-**Fundamentação:** Silberschatz §13.2.1–13.2.2: o polling desperdiça ciclos em espera ocupada, mas evita o custo da interrupção (troca de contexto e tratador). Ele compensa quando o dispositivo responde mais rápido que esse custo. No modelo, por requisição de 8 blocos: polling custa a duração do atendimento; interrupção custa 8 × (0,015 + 0,002) = 0,136 ms. No dispositivo rápido, a duração é 8 × 0,008 = 0,064 ms.
+**Fundamentação:** Silberschatz §13.2.1–13.2.2: o polling desperdiça ciclos em espera ocupada, mas evita o custo da interrupção (troca de contexto e tratador), e compensa quando o dispositivo responde mais rápido que esse custo. No modelo, para uma requisição de 8 blocos, o polling custa a duração do atendimento e a interrupção custa 8 × (0,015 + 0,002) = 0,136 ms. No dispositivo rápido, a duração é 8 × 0,008 = 0,064 ms.
 
-**Configuração:** FCFS; cargas aleatória e sequencial; disco rígido e dispositivo rápido (sem busca nem rotação); modos polling e interrupção. Mede a % do tempo total de CPU gasta com E/S.
+**Configuração:** FCFS; cargas aleatória e sequencial; disco rígido e dispositivo rápido (sem busca nem rotação); modos polling e interrupção. Mede-se a porcentagem do tempo total de CPU gasta com E/S.
 
 **Resultados:**
 
@@ -199,19 +204,20 @@ Todos os tempos estão em ms. "Resposta" é o intervalo entre a chegada e o fim 
 **Evidências:** resultados/es.csv (experimento=X2); graficos/X2_cpu.png.
 
 **Análise:**
-- **Disco rígido:** o polling queima praticamente toda a CPU durante o tempo em que o disco trabalha (86% e ~100%), enquanto a interrupção custa ~1%. O polling mede, na prática, a ocupação do disco.
-- **Dispositivo rápido:** a relação se inverte. Cada requisição dura 0,064 ms, menos que os 0,136 ms de 8 interrupções e 8 cópias, então o polling gasta **metade** da CPU da interrupção.
-- **Ponto de equilíbrio:** pelo modelo, o polling compensa quando a duração da requisição é menor que `n × 0,017 ms`, ou seja, para dispositivos de latência de microssegundos.
-- **Sequencial no dispositivo rápido:** a % de interrupção dobra (2,28%) não porque cada requisição custe mais, mas porque a carga termina em 11,9 s em vez de 32,5 s (o rígido saturava): o mesmo custo dividido por um tempo menor.
-- O modo de CPU não altera a resposta: no modelo, a CPU não está no caminho crítico do disco.
+
+No disco rígido, o polling ocupa a CPU praticamente durante todo o tempo em que o disco trabalha (86% na carga aleatória e quase 100% na sequencial), enquanto a interrupção custa cerca de 1%. Na prática, a porcentagem de CPU do polling acaba medindo a ocupação do disco.
+
+No dispositivo rápido, a relação se inverte. Cada requisição dura 0,064 ms, menos que os 0,136 ms de 8 interrupções e 8 cópias, e por isso o polling gasta metade da CPU gasta pela interrupção. Pelo modelo, o polling compensa sempre que a duração da requisição é menor que `n × 0,017 ms`, ou seja, apenas em dispositivos com latência da ordem de microssegundos.
+
+Na carga sequencial do dispositivo rápido, a porcentagem da interrupção dobra (2,28%). Isso não ocorre porque cada requisição custe mais, e sim porque a carga termina em 11,9 s em vez de 32,5 s (o disco rígido estava saturado), de modo que o mesmo custo é dividido por um tempo total menor. Observamos também que o modo de CPU não altera a resposta, já que no modelo a CPU não faz parte do caminho crítico do disco.
 
 **Veredito:** CONFIRMADA
 
 ### X3 — Acesso sequencial × direto
 
-**Hipótese:** Por operação de leitura, os dois padrões farão o mesmo número de acessos (1 bloco de 4 KiB), mas a leitura direta (banco de dados) custará várias vezes mais tempo, pois quase toda leitura paga busca + rotação, enquanto a sequencial (compilador) reaproveita a sequência física.
+**Hipótese:** Por operação de leitura, os dois padrões farão o mesmo número de acessos (1 bloco de 4 KiB), mas a leitura direta (banco de dados) custará várias vezes mais tempo, pois quase toda leitura paga busca e rotação, enquanto a sequencial (compilador) aproveita a sequência física.
 
-**Fundamentação:** Silberschatz §11.2 (métodos de acesso sequencial e direto) e §12.4.1 (a alocação contígua favorece os dois, com endereço direto). No modelo, uma leitura em sequência custa 0,04 ms; fora de sequência, ≥ 5,2 ms.
+**Fundamentação:** Silberschatz §11.2 (métodos de acesso sequencial e direto) e §12.4.1 (a alocação contígua favorece os dois, com endereço direto). No modelo, uma leitura em sequência custa 0,04 ms, e uma fora de sequência custa pelo menos 5,2 ms.
 
 **Configuração:** Cargas `fs_compilador` (3 compilações de 40 fontes de 2–64 KiB, cada uma lendo 3 cabeçalhos e gravando um `.o`) e `fs_banco_dados` (tabela de 64 MiB e 3.000 transações: 80% leituras e 20% escritas de 4 KiB em posições aleatórias, cada escrita com 512 B de log em modo acréscimo). Alocação contígua.
 
@@ -227,15 +233,15 @@ Todos os tempos estão em ms. "Resposta" é o intervalo entre a chegada e o fim 
 | banco de dados | write | 1.190 | 1,00 | 5,54 |
 | banco de dados | seek | 3.000 | 0,00 | 0,00 |
 
-No total, foram 1,38 acesso/op e 3,07 ms/op no compilador, contra 0,55 acesso/op e 3,01 ms/op no banco (os `seek` diluem a média).
+No total, foram 1,38 acesso/op e 3,07 ms/op no compilador, contra 0,55 acesso/op e 3,01 ms/op no banco, cuja média é diluída pelos `seek`.
 
 **Evidências:** resultados/arquivos_por_operacao.csv (experimento=X3); resultados/arquivos.csv (experimento=X3); graficos/X3_tempo_por_operacao.png.
 
 **Análise:**
-- **Banco de dados:** a leitura direta custa 3,7 vezes mais que a sequencial, com o mesmo número de acessos. A tabela ocupa 16.384 blocos (256 cilindros), então uma posição aleatória está a ~85 cilindros: 1 + 0,26 + 4,17 + 0,04 ≈ 5,47 ms, quase exatamente os 5,49 medidos.
-- **Compilador:** a primeira leitura de cada arquivo paga busca + rotação (o `open` anterior leu diretórios em outro lugar), e as seguintes custam 0,04 ms. A média de 1,48 ms reflete arquivos de ~8 blocos.
-- **Custos fixos do sistema de arquivos:** `open` (3 leituras de diretório, 8,2 ms) e `create` (4 acessos) dominam o tempo do compilador. Isso antecipa o X4.
-- Pela hipótese, o seek não acessa o disco e o log em modo acréscimo grava 1 bloco por transação. Ambos conferem.
+
+No banco de dados, a leitura direta custou 3,7 vezes mais que a sequencial, com o mesmo número de acessos. A tabela ocupa 16.384 blocos (256 cilindros), então uma posição aleatória fica em média a cerca de 85 cilindros da anterior, o que dá 1 + 0,26 + 4,17 + 0,04 ≈ 5,47 ms, valor muito próximo dos 5,49 ms medidos.
+
+No compilador, a primeira leitura de cada arquivo paga busca e rotação, porque o `open` anterior leu diretórios em outra região do disco, e as leituras seguintes custam 0,04 ms. A média de 1,48 ms reflete arquivos de cerca de 8 blocos. Os custos fixos do sistema de arquivos, como o `open` (3 leituras de diretório, 8,2 ms) e o `create` (4 acessos), dominam o tempo do compilador, o que antecipa o resultado do X4. Por fim, como previsto, o `seek` não acessa o disco e o log em modo acréscimo grava 1 bloco por transação.
 
 **Veredito:** CONFIRMADA
 
@@ -243,9 +249,9 @@ No total, foram 1,38 acesso/op e 3,07 ms/op no compilador, contra 0,55 acesso/op
 
 **Hipótese:** O `open` fará `d + 1` leituras para um arquivo a `d` diretórios de profundidade (a raiz mais os `d` diretórios), e o tempo crescerá aproximadamente na mesma proporção, cerca de 5 ms por nível, já que cada diretório é um bloco em outro lugar do disco.
 
-**Fundamentação:** Silberschatz §11.3 (diretórios em árvore) e as regras de custo de `sistema.py`: resolver lê um bloco por diretório do caminho. Sem cache de diretórios, cada nível é um acesso ao disco.
+**Fundamentação:** Silberschatz §11.3 (diretórios em árvore) e as regras de custo de `sistema.py`, segundo as quais resolver um caminho lê um bloco por diretório. Sem cache de diretórios, cada nível é um acesso ao disco.
 
-**Configuração:** Uma cadeia de `d` diretórios (`/n1/n2/…/nd`) com `f.txt` no fim, `d` = 1…10, e 20 ciclos de `open` + `read` + `close` de 4 KiB por P2. Alocação contígua. Extra E3 (fora dos resultados oficiais): a mesma cadeia de 1 a 10 diretórios, criada de verdade num SSD e num HDD de uma máquina real, medindo 5.000 `os.open` + `os.close` por profundidade (`extras/e3_open_real.py`).
+**Configuração:** Uma cadeia de `d` diretórios (`/n1/n2/…/nd`) com `f.txt` no fim, `d` = 1…10, e 20 ciclos de `open` + `read` + `close` de 4 KiB por P2. Alocação contígua. No extra E3 (fora dos resultados oficiais), a mesma cadeia de 1 a 10 diretórios foi criada de fato num SSD e num HDD de uma máquina real, medindo 5.000 `os.open` + `os.close` por profundidade (`extras/e3_open_real.py`).
 
 **Resultados:**
 
@@ -254,7 +260,7 @@ No total, foram 1,38 acesso/op e 3,07 ms/op no compilador, contra 0,55 acesso/op
 | Acessos por open | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
 | Tempo por open (ms) | 4,25 | 4,29 | 4,33 | 4,37 | 4,41 | 4,45 | 4,49 | 4,53 | 4,57 | 4,61 |
 
-Extra E3, na máquina real (Windows 11, NTFS, Intel Core i5-11400H): mediana de 5.000 `open` + `close` por profundidade, com os metadados na cache. Os tempos estão em **µs** (1 ms = 1.000 µs).
+Extra E3, na máquina real (Windows 11, NTFS, Intel Core i5-11400H): mediana de 5.000 `open` + `close` por profundidade, com os metadados na cache. Os tempos desta tabela estão em µs (1 ms = 1.000 µs).
 
 | Profundidade | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -264,21 +270,24 @@ Extra E3, na máquina real (Windows 11, NTFS, Intel Core i5-11400H): mediana de 
 **Evidências:** resultados/arquivos_por_operacao.csv (experimento=X4, operacao=open); graficos/X4_open_por_profundidade.png; extra E3: resultados/extras/E3_open_real.csv; graficos/extras/E3_open_real.png.
 
 **Análise:**
-- **Acessos:** crescem exatamente como `d + 1`.
-- **Tempo:** sobe só **0,04 ms por nível**, o tempo de transferir um bloco. Os diretórios foram criados em sequência numa partição vazia com alocação contígua (first-fit), então ocupam os blocos 0, 1, 2, …, *d* consecutivos. Só a primeira leitura (raiz) paga a latência rotacional (4,17 ms). Nem busca ela paga, porque todos esses blocos estão no cilindro 0, onde o braço já está. Cada diretório seguinte é o bloco físico seguinte e, pela regra do modelo, não paga rotação. Assim, o tempo do `open` é 4,17 + (*d* + 1) × 0,04 ms: 4,25 ms para *d* = 1 e 4,61 ms para *d* = 10, exatamente os valores da tabela.
-- **O `read` custa 0,04 ms:** o bloco de `f.txt` foi alocado logo depois do último diretório, então a leitura continua a sequência e também não paga rotação. Já o `open` seguinte volta ao bloco 0 (raiz) e paga a rotação de novo.
-- O custo real da resolução depende da **localidade dos metadados**. Sistemas reais tentam obter essa localidade (grupos de blocos do ext4, MFT do NTFS) e, sobretudo, evitam o disco com caches de nomes (seção 4).
-- **Por que a hipótese errou no tempo:** ela supunha diretórios espalhados. Com diretórios espalhados, cada nível custaria ~5 ms, e o `open` a 10 níveis levaria ~55 ms.
-- **Comparação com a máquina real (extra E3):** num sistema real, o `open` + `close` levou 27 µs no SSD e 41 µs no HDD, **constante** de 1 a 10 níveis: a variação ficou abaixo de 1,5 µs, dentro do ruído da medição. O `open` simulado (4,25 a 4,61 ms) é cerca de 160 vezes mais lento, e só o acréscimo de **um** nível no simulador (40 µs) custa mais que um `open` real inteiro. Com os metadados na cache, nem a profundidade nem o tipo de mídia importam: uma única busca ou rotação do HDD custaria milissegundos, e nenhuma medição chegou perto disso. Quem resolve o caminho é a cache de nomes do sistema operacional (seção 4), exatamente o que o modelo não tem. A diferença de ~14 µs entre os dois volumes é constante, não cresce com a profundidade, então não vem da resolução do caminho no disco. Ela deve ser custo fixo por volume (por exemplo, drivers de filtro como o antivírus), mas não a isolamos.
-- **Ressalva do E3:** medimos com a cache quente. Medir com a cache fria exigiria privilégio de administrador (por exemplo, `drop_caches` no Linux), e só nesse caso o disco apareceria. Os números do E3 dependem da máquina e não substituem os oficiais.
+
+O número de acessos cresceu como `d + 1`, conforme previsto. O tempo, porém, subiu apenas 0,04 ms por nível, que é o tempo de transferir um bloco. Isso acontece porque os diretórios foram criados em sequência numa partição vazia com alocação contígua (first-fit) e por isso ocupam os blocos consecutivos 0, 1, 2, …, *d*. Somente a primeira leitura, a da raiz, paga a latência rotacional de 4,17 ms, e nem a busca ela paga, pois todos esses blocos estão no cilindro 0, onde o braço já se encontra. Cada diretório seguinte é o próximo bloco físico e, pela regra do modelo, não paga rotação. O tempo do `open` é, portanto, 4,17 + (*d* + 1) × 0,04 ms, o que dá 4,25 ms para *d* = 1 e 4,61 ms para *d* = 10, os mesmos valores da tabela.
+
+O `read` também custa 0,04 ms, porque o bloco de `f.txt` foi alocado logo depois do último diretório e a leitura continua a sequência. O `open` seguinte, por outro lado, volta ao bloco 0 (raiz) e paga a rotação novamente.
+
+A hipótese errou no tempo porque supunha diretórios espalhados pelo disco. Nesse caso, cada nível custaria cerca de 5 ms e o `open` a 10 níveis levaria cerca de 55 ms. O resultado mostra que o custo da resolução depende da localidade dos metadados. Sistemas reais procuram obter essa localidade, como nos grupos de blocos do ext4 e na MFT do NTFS, e sobretudo evitam o disco com caches de nomes (seção 4).
+
+O extra E3 permite comparar com uma máquina real. Nela, o `open` + `close` levou 27 µs no SSD e 41 µs no HDD, praticamente constante de 1 a 10 níveis: a variação ficou abaixo de 1,5 µs, dentro do ruído da medição. O `open` simulado (4,25 a 4,61 ms) é cerca de 160 vezes mais lento, e o acréscimo de um único nível no simulador (40 µs) já custa mais que um `open` real inteiro. Com os metadados na cache, nem a profundidade nem o tipo de mídia influenciam o resultado, já que uma única busca ou rotação do HDD custaria milissegundos e nenhuma medição chegou perto disso. Quem resolve o caminho é a cache de nomes do sistema operacional, componente que o modelo não possui. A diferença de cerca de 14 µs entre os dois volumes é constante e não cresce com a profundidade, logo não vem da resolução do caminho no disco. Acreditamos que seja um custo fixo por volume, por exemplo de drivers de filtro como o antivírus, mas não chegamos a isolá-lo.
+
+É importante notar que o E3 foi medido com a cache quente. Uma medição com a cache fria exigiria privilégio de administrador (por exemplo, `drop_caches` no Linux), e apenas nesse caso o disco apareceria nos tempos. Os números do E3 dependem da máquina e não substituem os resultados oficiais.
 
 **Veredito:** PARCIALMENTE CONFIRMADA
 
 ### X5 — Tabelas de arquivos abertos com vários processos
 
-**Hipótese:** Com 8 trabalhadores abrindo 3 páginas cada uma (de um conjunto de 12), a soma das tabelas por processo chegará a 24 entradas, cada tabela por processo a 3, e a tabela global ficará limitada pelo número de arquivos distintos (≤ 12). O contador de aberturas de uma página popular passará de 1 (há compartilhamento).
+**Hipótese:** Com 8 trabalhadores abrindo 3 páginas cada um (de um conjunto de 12), a soma das tabelas por processo chegará a 24 entradas, cada tabela por processo a 3, e a tabela global ficará limitada pelo número de arquivos distintos (≤ 12). O contador de aberturas de uma página popular passará de 1, pois há compartilhamento.
 
-**Fundamentação:** Silberschatz §11.1.2: há uma tabela por processo (posição, modo) que aponta para uma tabela do sistema (uma entrada por arquivo aberto, com contador de aberturas). O FCB é lido uma vez, por mais que o arquivo seja aberto várias vezes.
+**Fundamentação:** Silberschatz §11.1.2: há uma tabela por processo (posição, modo) que aponta para uma tabela do sistema, com uma entrada por arquivo aberto e um contador de aberturas. O FCB é lido uma vez, por mais que o arquivo seja aberto várias vezes.
 
 **Configuração:** Carga `fs_servidor_web`: 12 páginas de 8–96 KiB e 40 rodadas. Em cada rodada, 8 processos abrem 3 páginas sorteadas, leem tudo em pedaços de 16 KiB e fecham.
 
@@ -295,10 +304,12 @@ Extra E3, na máquina real (Windows 11, NTFS, Intel Core i5-11400H): mediana de 
 **Evidências:** resultados/arquivos.csv (experimento=X5); resultados/arquivos_por_operacao.csv (experimento=X5); graficos/X5_tabelas.png.
 
 **Análise:**
-- **Tabelas:** a soma das tabelas por processo (24) é o dobro da tabela global (12). As 24 aberturas simultâneas apontam para só 12 entradas globais, e uma das páginas chegou a ter 6 aberturas ao mesmo tempo, cada uma com sua posição.
-- **close:** custa 0 acessos porque as aberturas são só de leitura (FCB não sujo).
-- **read:** custa 3,65 acessos porque cada leitura de 16 KiB toca 4 blocos, exceto a última, parcial.
-- **Memória:** o tamanho da tabela global cresce com o número de *arquivos distintos* abertos, e o das tabelas por processo com o número de *aberturas*. Num servidor real com milhares de conexões, a memória das tabelas por processo é o que cresce. Por isso existem limites como `ulimit -n` no Linux.
+
+A soma das tabelas por processo (24 entradas) foi o dobro da tabela global (12 entradas). As 24 aberturas simultâneas apontam para apenas 12 entradas globais, e uma das páginas chegou a ter 6 aberturas ao mesmo tempo, cada uma com sua própria posição.
+
+O `close` custou 0 acessos porque todas as aberturas são somente de leitura e o FCB não fica sujo. Já o `read` custou em média 3,65 acessos, porque cada leitura de 16 KiB toca 4 blocos, com exceção da última, que é parcial.
+
+Em termos de memória, o tamanho da tabela global cresce com o número de arquivos distintos abertos, enquanto as tabelas por processo crescem com o número de aberturas. Num servidor real com milhares de conexões, são as tabelas por processo que crescem, e por isso existem limites como o `ulimit -n` no Linux.
 
 **Veredito:** CONFIRMADA
 
@@ -306,7 +317,7 @@ Extra E3, na máquina real (Windows 11, NTFS, Intel Core i5-11400H): mediana de 
 
 **Hipótese:** A taxa de acertos crescerá com a capacidade e saturará quando a cache couber todos os blocos distintos da carga. A LRU acertará mais que a FIFO nas capacidades pequenas (localidade de Zipf). O write-back fará menos escritas físicas e terá resposta menor que o write-through, mas perderá blocos sujos numa queda de energia; o write-through não perderá nada.
 
-**Fundamentação:** Silberschatz §13.4.3 (caching) e §12.6.2 (buffer cache unificada, escrita síncrona × assíncrona). A LRU aproxima o algoritmo ótimo quando há localidade temporal. No write-back, a escrita é adiada até a expulsão ou a sincronização periódica (5.000 ms).
+**Fundamentação:** Silberschatz §13.4.3 (caching) e §12.6.2 (buffer cache unificada, escrita síncrona × assíncrona). A LRU se aproxima do algoritmo ótimo quando há localidade temporal. No write-back, a escrita é adiada até a expulsão ou até a sincronização periódica (5.000 ms).
 
 **Configuração:** Carga `es_reuso`: 3.000 requisições de 1 bloco, Zipf sobre 4.000 páginas, 65% leituras, chegadas a cada 8 ms em média. FCFS; LRU e FIFO; capacidade de 64 a 2.048 blocos; write-through e write-back. A queda de energia é simulada na metade da carga (11.733 ms).
 
@@ -339,22 +350,26 @@ Extra E2 (LRU 512, write-back), comparando as leituras que chegam até 1 s depoi
 **Evidências:** resultados/es.csv (experimento=X6); graficos/X6_acerto.png; graficos/X6_escrita.png; resultados/extras/E2_tempestade_write_back.csv; graficos/extras/E2_tempestade_write_back.png.
 
 **Análise:**
-- **Saturação dos acertos:** os acertos saturam em 67% a partir de 1.024 blocos, porque a carga toca só 992 blocos distintos. A partir daí, a cache guarda tudo, e as únicas faltas são as compulsórias (a primeira referência a cada bloco). LRU e FIFO empatam, e qualquer política seria ótima.
-- **LRU × FIFO:** nas capacidades pequenas, a LRU vence (39,6% contra 31,3% com 64 blocos), porque na distribuição de Zipf os blocos populares são re-referenciados e a LRU os mantém, enquanto a FIFO os expulsa periodicamente só por serem antigos.
-- **Sem cache, o disco satura:** cada requisição leva ~10,5 ms e chega uma a cada 8 ms, o que dá 3,5 s de resposta. Qualquer cache, mesmo de 64 blocos, tira o disco da saturação: a resposta cai de 3.500 para 23–75 ms.
-- **Write-back:** reduz as escritas físicas pela metade (1.045 para 541), porque regravações do mesmo bloco se fundem na cache. Em compensação, perde até 55 blocos na queda; o write-through nunca perde nada.
-- **Contradição com a hipótese (tempestade de escrita):** com 256 blocos ou mais, a resposta média do write-back (≈45 ms) é **pior** que a do write-through (≈18–22 ms). A cada 5 s, o `sincronizar` joga dezenas de blocos sujos espalhados na fila de uma vez. Com FCFS, as leituras que chegam logo depois esperam todas essas escritas: no extra E2, essas leituras levam 310 ms contra 22 ms das demais. Com capacidade 64, isso não acontece porque os sujos são expulsos aos poucos, de forma contínua.
-- **Mitigação:** sincronizar com mais frequência (1 s) suaviza as rajadas. Usar SSTF reordena a rajada (310 para 60 ms). Sincronizar raramente (30 s) quase elimina as escritas (228), mas os dados ficam só na memória. É o mesmo dilema de qualquer sistema real (seção 4).
+
+A taxa de acertos saturou em 67% a partir de 1.024 blocos, porque a carga toca apenas 992 blocos distintos. A partir desse ponto a cache guarda todos os blocos, e as únicas faltas são as compulsórias, isto é, a primeira referência a cada bloco. Por isso LRU e FIFO empatam, e qualquer política seria ótima. Nas capacidades pequenas, a LRU foi melhor que a FIFO (39,6% contra 31,3% com 64 blocos). Na distribuição de Zipf, os blocos populares são referenciados repetidamente, e a LRU os mantém na cache, enquanto a FIFO acaba expulsando-os periodicamente apenas por serem antigos.
+
+Sem cache, o disco satura: cada requisição leva cerca de 10,5 ms e chega uma a cada 8 ms, o que resulta em 3,5 s de resposta média. Qualquer cache, mesmo de 64 blocos, tira o disco da saturação e reduz a resposta de 3.500 ms para valores entre 23 e 75 ms.
+
+O write-back reduziu as escritas físicas aproximadamente pela metade (de 1.045 para 541), porque regravações do mesmo bloco são agrupadas na cache. Em contrapartida, chegou a perder 55 blocos na queda de energia, enquanto o write-through não perdeu nenhum.
+
+Um resultado contrariou a hipótese. Com 256 blocos ou mais, a resposta média do write-back (cerca de 45 ms) foi pior que a do write-through (entre 18 e 22 ms). A cada 5 s, o `sincronizar` coloca de uma só vez na fila dezenas de blocos sujos espalhados pelo disco, e com FCFS as leituras que chegam logo depois precisam esperar todas essas escritas. No extra E2, essas leituras levaram 310 ms, contra 22 ms das demais. Com capacidade de 64 blocos isso não ocorre, porque os blocos sujos são expulsos aos poucos, de forma contínua.
+
+O E2 também mostra formas de atenuar o problema. Sincronizar com mais frequência (1 s) suaviza as rajadas, e usar SSTF reordena a rajada, reduzindo a resposta de 310 para 60 ms. Sincronizar raramente (30 s) quase elimina as escritas (228), mas os dados ficam por mais tempo apenas na memória. Esse compromisso entre desempenho e durabilidade também aparece nos sistemas reais (seção 4).
 
 **Veredito:** PARCIALMENTE CONFIRMADA
 
 ### X7 — Escalonadores avançados e inanição (M2)
 
-**Hipótese:** Com carga crescente, o SSTF terá a menor resposta média e a maior espera máxima. SCAN e C-SCAN terão espera máxima menor mas mais deslocamento, e LOOK e C-LOOK serão melhores que SCAN e C-SCAN em tudo. O C-LOOK terá a espera mais uniforme. O DEADLINE terá a média do SSTF e limitará a espera das leituras a ~200 ms.
+**Hipótese:** Com carga crescente, o SSTF terá a menor resposta média e a maior espera máxima. SCAN e C-SCAN terão espera máxima menor, mas mais deslocamento, e LOOK e C-LOOK serão melhores que SCAN e C-SCAN em todos os indicadores. O C-LOOK terá a espera mais uniforme. O DEADLINE terá a média do SSTF e limitará a espera das leituras a cerca de 200 ms.
 
-**Fundamentação:** Silberschatz §10.4: o C-SCAN dá tempo de espera mais uniforme, e o LOOK/C-LOOK evitam ir até a borda sem necessidade. O mq-deadline do Linux combina ordenação por posição com prazos por requisição (parâmetros do simulador: 200 ms para leituras e 2.000 ms para escritas).
+**Fundamentação:** Silberschatz §10.4: o C-SCAN dá tempo de espera mais uniforme, e o LOOK e o C-LOOK evitam ir até a borda sem necessidade. O mq-deadline do Linux combina ordenação por posição com prazos por requisição (parâmetros do simulador: 200 ms para leituras e 2.000 ms para escritas).
 
-**Configuração:** Carga concentrada gerada com semente 7 (2.000 requisições), intervalo médio de 14, 11, 9 e 8 ms (≈71 a 125 req/s); 7 escalonadores; disco rígido.
+**Configuração:** Carga concentrada gerada com semente 7 (2.000 requisições), intervalo médio de 14, 11, 9 e 8 ms (de 71 a 125 req/s, aproximadamente); 7 escalonadores; disco rígido.
 
 **Resultados:** (resposta média / espera máxima, em ms; deslocamento em milhões de cilindros)
 
@@ -368,25 +383,27 @@ Extra E2 (LRU 512, write-back), comparando as leituras que chegam até 1 s depoi
 | C-LOOK | 14,7 / 102,8 | 19,4 / 97,4 | 28,4 / 139,4 | 38,9 / 163,8 | 1,26 |
 | DEADLINE | 13,4 / 86,6 | 16,7 / 129,0 | 22,0 / 204,2 | 28,4 / 244,8 | 1,15 |
 
-Detalhe a 8 ms (nossa análise, a partir das requisições concluídas): espera máxima das **leituras** de 327,1 ms no SSTF e 208,3 ms no DEADLINE. A espera máxima de 244,8 ms do DEADLINE é de uma **escrita** (prazo de 2 s, ainda não vencido).
+Detalhe a 8 ms, calculado a partir das requisições concluídas: a espera máxima das leituras foi de 327,1 ms no SSTF e de 208,3 ms no DEADLINE. A espera máxima de 244,8 ms do DEADLINE corresponde a uma escrita, cujo prazo de 2 s ainda não havia vencido.
 
 **Evidências:** resultados/es.csv (experimento=X7); graficos/X7_espera_max_ms.png; graficos/X7_resposta_p95_ms.png; graficos/X7_deslocamento_total.png.
 
 **Análise:**
-- **SSTF:** tem a menor média em todas as cargas e uma espera máxima que cresce com a carga (87 para 327 ms): a inanição aparece à medida que a fila cresce.
-- **FCFS:** é o mais justo com carga leve (espera máxima de 71 ms), mas explode quando a fila cresce (616 ms a 8 ms).
-- **SCAN e C-SCAN:** têm as *piores* médias em quase todas as cargas, pelo mesmo motivo do X1 (idas até a borda com a fila curta). O retorno do C-SCAN ao cilindro 0 dá a ele o maior deslocamento.
-- **LOOK e C-LOOK:** confirmam o livro. Têm deslocamento próximo ao do SSTF e espera máxima 48–50% menor que a dele a 8 ms. O C-LOOK é o mais uniforme sob carga alta (menor espera máxima: 139 e 164 ms).
-- **DEADLINE:** se comporta exatamente como o SSTF enquanto nenhum prazo vence (14 e 11 ms). Sob carga alta, corta a espera das leituras para ~200 ms + um atendimento (208 ms), quase sem custo na média (28,4 contra 27,8). Ele não limita as escritas, porque o prazo delas é 10 vezes maior.
-- **Por que a hipótese errou no DEADLINE:** ela supunha um limite de espera para todas as requisições, mas é exatamente a assimetria entre leituras e escritas do mq-deadline que o explica: leituras costumam bloquear processos; escritas, em geral, não.
+
+O SSTF teve a menor resposta média em todas as cargas, mas sua espera máxima cresceu com a carga, de 87 para 327 ms, o que mostra a inanição aparecendo à medida que a fila aumenta. O FCFS foi o mais justo com carga leve (espera máxima de 71 ms), mas seu desempenho piorou muito quando a fila cresceu, chegando a 616 ms com intervalo de 8 ms.
+
+SCAN e C-SCAN tiveram as piores médias em quase todas as cargas, pelo mesmo motivo observado no X1: com a fila curta, o braço vai até a borda sem necessidade. O retorno do C-SCAN ao cilindro 0 faz com que ele tenha o maior deslocamento entre os dois.
+
+LOOK e C-LOOK confirmaram o que o livro descreve. Eles tiveram deslocamento próximo ao do SSTF e espera máxima entre 48% e 50% menor que a dele com intervalo de 8 ms. O C-LOOK foi o mais uniforme sob carga alta, com as menores esperas máximas (139 e 164 ms).
+
+O DEADLINE se comportou exatamente como o SSTF enquanto nenhum prazo venceu (intervalos de 14 e 11 ms). Sob carga alta, ele limitou a espera das leituras a cerca de 200 ms mais um atendimento (208 ms), quase sem custo na média (28,4 contra 27,8 ms). As escritas não foram limitadas, porque seu prazo é 10 vezes maior. A hipótese errou nesse ponto porque supunha um limite de espera para todas as requisições. A assimetria entre leituras e escritas é proposital no mq-deadline, já que as leituras costumam bloquear processos e as escritas, em geral, não.
 
 **Veredito:** PARCIALMENTE CONFIRMADA
 
 ### X8 — DMA e buffering (M3)
 
-**Hipótese:** O custo de CPU da interrupção crescerá linearmente com o tamanho da requisição, e o do DMA será constante. Por isso, o DMA vencerá a partir de requisições de poucos blocos, e o polling será sempre o pior no disco rígido. No buffering, o buffer duplo reduzirá o tempo total de `blocos × (p + c)` para ≈ `blocos × max(p, c)`, e o terceiro buffer não trará ganho com taxas constantes.
+**Hipótese:** O custo de CPU da interrupção crescerá linearmente com o tamanho da requisição, e o do DMA será constante. Por isso, o DMA vencerá a partir de requisições de poucos blocos, e o polling será sempre o pior no disco rígido. No buffering, o buffer duplo reduzirá o tempo total de `blocos × (p + c)` para aproximadamente `blocos × max(p, c)`, e o terceiro buffer não trará ganho com taxas constantes.
 
-**Fundamentação:** Silberschatz §13.2.3 (DMA: a CPU só programa a transferência e trata uma interrupção no fim) e §13.4.2 (buffering duplo desacopla produtor e consumidor; o circular generaliza). Pelo modelo, a interrupção custa 0,017 ms por bloco, e o DMA, 0,018 ms por requisição.
+**Fundamentação:** Silberschatz §13.2.3 (no DMA, a CPU só programa a transferência e trata uma interrupção no fim) e §13.4.2 (o buffering duplo desacopla produtor e consumidor, e o circular generaliza essa ideia). Pelo modelo, a interrupção custa 0,017 ms por bloco, e o DMA, 0,018 ms por requisição.
 
 **Configuração:** Carga aleatória (semente 11, 1.000 requisições, intervalo de 40 ms) com 1, 8, 64 e 256 blocos por requisição, nos modos polling, interrupção e DMA. Buffering: produção de 2 ms/bloco, gravação de 0,5, 2 ou 8 ms/bloco, 1, 2 e 3 buffers, 500 blocos.
 
@@ -408,11 +425,12 @@ Detalhe a 8 ms (nossa análise, a partir das requisições concluídas): espera 
 **Evidências:** resultados/es.csv (experimento=X8); resultados/buffering.csv; graficos/X8_cpu.png; graficos/X8_buffering.png.
 
 **Análise:**
-- **DMA × interrupção:** o DMA fica constante em 0,045%, e a interrupção cresce exatamente com o número de blocos (0,042% para 10,8%, ×256). Com **1 bloco**, a interrupção é *mais barata* que o DMA (0,017 contra 0,018 ms): programar a controladora não compensa para uma única palavra ou bloco. O ponto de equilíbrio é 2 blocos (teste nosso em `test_grupo.py`). É o que o livro diz: DMA para transferências grandes.
-- **Polling:** varia de 25% a 50% porque mede a ocupação do disco, que cresce com o tempo de transferência.
-- **Buffering:** com 1 buffer, produtor e dispositivo se alternam, e o tempo é a soma `p + c` por bloco. Com 2, eles se sobrepõem, e o tempo é ≈ `max(p, c)` por bloco: 2.000 para 1.002 ms quando `p = c`, com o dispositivo a 99,8%.
-- **Terceiro buffer:** não muda nada com taxas constantes. Quando o dispositivo é o gargalo (8 ms), o produtor fica bloqueado de qualquer jeito; buffers extras só absorvem *variações* de taxa, como rajadas de uma câmera.
-- **Onde o buffer duplo ajuda mais:** quando `p ≈ c` (2× mais rápido). Com `c = 0,5`, o ganho é pequeno (20%), porque o produtor já é o gargalo.
+
+O custo do DMA ficou constante em 0,045% da CPU, enquanto o da interrupção cresceu na mesma proporção do número de blocos, de 0,042% para 10,8% (256 vezes). Com apenas 1 bloco, a interrupção foi mais barata que o DMA (0,017 contra 0,018 ms), pois programar a controladora não compensa para uma transferência tão pequena. O ponto de equilíbrio é de 2 blocos, o que verificamos com um teste em `test_grupo.py`. Esse resultado está de acordo com o livro, que recomenda o DMA para transferências grandes. O polling variou entre 25% e 50% porque, como no X2, mede a ocupação do disco, que cresce com o tempo de transferência.
+
+No buffering, com 1 buffer o produtor e o dispositivo se alternam e o tempo por bloco é a soma `p + c`. Com 2 buffers as duas atividades se sobrepõem e o tempo por bloco fica próximo de `max(p, c)`. Quando `p = c`, o tempo total caiu de 2.000 para 1.002 ms, com o dispositivo ocupado 99,8% do tempo. Com `c = 0,5`, o ganho foi menor (20%), porque o produtor já era o gargalo, e o buffer duplo é mais útil justamente quando as duas taxas são parecidas.
+
+O terceiro buffer não alterou nenhum resultado com taxas constantes. Quando o dispositivo é o gargalo (8 ms por bloco), o produtor fica bloqueado de qualquer forma. Buffers adicionais só são úteis para absorver variações de taxa, como as rajadas de uma câmera.
 
 **Veredito:** CONFIRMADA
 
@@ -420,7 +438,7 @@ Detalhe a 8 ms (nossa análise, a partir das requisições concluídas): espera 
 
 **Hipótese:** O hard link continuará funcionando depois do `unlink` do nome original (os blocos só são liberados quando `links` zera). O link simbólico para `b.txt` ficará pendente (ENOENT). O laço `l1 ↔ l2` dará ELOOP, e o hard link para diretório dará EPERM. A travessia detectará os ciclos criados por `/dados/sub/volta → /atalhos` e não entrará em laço. Abrir por um link simbólico custará mais leituras de diretório que pelo caminho direto.
 
-**Fundamentação:** Silberschatz §11.3.3–11.3.4 (diretórios em grafo acíclico e em grafo geral): hard links exigem contagem de referências; links simbólicos podem ficar pendentes; um grafo com ciclos exige que a travessia marque o que visitou; hard links para diretórios são proibidos justamente para manter o grafo acíclico.
+**Fundamentação:** Silberschatz §11.3.3–11.3.4 (diretórios em grafo acíclico e em grafo geral): hard links exigem contagem de referências; links simbólicos podem ficar pendentes; um grafo com ciclos exige que a travessia marque o que já visitou; e hard links para diretórios são proibidos justamente para manter o grafo acíclico.
 
 **Configuração:** Carga `fs_links`: 3 diretórios, 3 arquivos, 1 hard link, 4 links simbólicos (um para diretório, um que cria ciclo, dois em laço), 3 rodadas de leitura pelos links, `percorrer /` antes e depois de remover `a.txt` e `b.txt`, e `percorrer /atalhos`.
 
@@ -436,23 +454,27 @@ Detalhe a 8 ms (nossa análise, a partir das requisições concluídas): espera 
 | Links em laço encontrados nas travessias | 6 |
 | Acessos médios por percorrer / por open | 44,0 / 4,92 |
 
+Leituras de diretório em cada `open` da carga:
+
+| Caminho aberto | Leituras | Caminho direto equivalente |
+|---|---:|---:|
+| `/atalhos/a_rigido` (hard link) | 2 | 2 (`/dados/a.txt`) |
+| `/atalhos/b_simbolico` | 4 | 2 (`/dados/b.txt`) |
+| `/atalhos/dados_simbolico/sub/c.txt` | 5 | 3 (`/dados/sub/c.txt`) |
+| `/atalhos/dados_simbolico/sub/volta/a_rigido` (2 links) | 7 | 2 |
+| `/atalhos/l1` (laço, termina em ELOOP) | 18 | — |
+
 **Evidências:** resultados/arquivos.csv (experimento=X9); resultados/arquivos_por_operacao.csv (experimento=X9); graficos/X9_links.png.
 
 **Análise:**
-- **Erros previstos:** todos aconteceram, cada um uma única vez. `a_rigido` continuou legível depois do `unlink /dados/a.txt` (o FCB tinha `links = 2`, e os blocos ficaram ocupados). O `b_simbolico` virou um ponteiro pendente.
-- **Ciclos:** a travessia terminou nas três execuções e não entrou em laço. Os 5 "ciclos" contam toda revisita, como pede a regra: o ciclo verdadeiro (`/dados/sub/volta → /atalhos → dados_simbolico → /dados`) e as revisitas inofensivas, como chegar de novo a `/atalhos` pela raiz depois de tê-lo visitado pelo link. Um `find -L` real distingue os dois casos comparando com os *ancestrais* da travessia, e não com tudo o que já foi visitado.
-- **Custo de seguir links:** cada link simbólico faz a resolução recomeçar da raiz e pagar de novo os diretórios do alvo. Medimos cada `open` da carga:
 
-  | Caminho aberto | Leituras | Caminho direto equivalente |
-  |---|---:|---:|
-  | `/atalhos/a_rigido` (hard link) | 2 | 2 (`/dados/a.txt`) |
-  | `/atalhos/b_simbolico` | 4 | 2 (`/dados/b.txt`) |
-  | `/atalhos/dados_simbolico/sub/c.txt` | 5 | 3 (`/dados/sub/c.txt`) |
-  | `/atalhos/dados_simbolico/sub/volta/a_rigido` (2 links) | 7 | 2 |
-  | `/atalhos/l1` (laço, termina em ELOOP) | 18 | — |
+Todos os erros previstos ocorreram, cada um uma única vez. O `a_rigido` continuou legível depois do `unlink /dados/a.txt`, porque o FCB tinha `links = 2` e os blocos permaneceram ocupados, enquanto o `b_simbolico` se tornou um ponteiro pendente.
 
-  O hard link não custa nada a mais: é só mais uma entrada de diretório apontando para o mesmo FCB. O link simbólico custa a leitura dos diretórios do alvo, desde a raiz. Por exemplo, `.../c.txt` lê `/` e `/atalhos`, recomeça e lê `/`, `/dados` e `/dados/sub`. O `open` em laço lê `/` e `/atalhos` em cada um dos 9 recomeços até o ELOOP (9 × 2 = 18). É ele que puxa a média para 4,92 leituras por `open`: sem ele, a média dos outros 12 é 3,83.
-- **Custo das travessias:** cada `percorrer` custa 44 acessos, dos quais **36 (82%) vêm dos dois links em laço** (`l1` e `l2`, 18 leituras cada até o ELOOP). Só 3 ou 4 são leituras dos diretórios visitados, e o restante é a resolução dos alvos dos outros links. Um laço de links simbólicos não trava a travessia, graças ao limite de saltos, mas custa caro a cada visita. Num sistema real, esse custo fica na memória (dcache), e o Linux aceita até 40 links numa única resolução antes do ELOOP.
+A travessia terminou nas três execuções sem entrar em laço. Os 5 ciclos registrados contam todas as revisitas, como pede a regra. Entre eles está o ciclo verdadeiro (`/dados/sub/volta → /atalhos → dados_simbolico → /dados`), mas também revisitas inofensivas, como chegar novamente a `/atalhos` pela raiz depois de tê-lo visitado pelo link. Um `find -L` real distingue os dois casos comparando cada diretório com os ancestrais da travessia, e não com tudo o que já foi visitado.
+
+Cada link simbólico faz a resolução recomeçar da raiz e pagar novamente os diretórios do alvo, como mostra a segunda tabela. O hard link não tem custo adicional, já que é apenas mais uma entrada de diretório apontando para o mesmo FCB. O link simbólico, por sua vez, custa a leitura dos diretórios do alvo desde a raiz. Por exemplo, abrir `.../c.txt` lê `/` e `/atalhos`, recomeça e lê `/`, `/dados` e `/dados/sub`. O `open` em laço lê `/` e `/atalhos` em cada um dos 9 recomeços até o ELOOP (9 × 2 = 18 leituras), e é ele que eleva a média para 4,92 leituras por `open`. Sem esse caso, a média dos outros 12 `open` é de 3,83.
+
+Cada `percorrer` custou 44 acessos, dos quais 36 (82%) vêm dos dois links em laço, `l1` e `l2`, com 18 leituras cada até o ELOOP. Apenas 3 ou 4 acessos são leituras dos diretórios visitados, e o restante corresponde à resolução dos alvos dos demais links. Um laço de links simbólicos não trava a travessia, graças ao limite de saltos, mas encarece cada visita. Num sistema real, esse custo é absorvido pela memória (dcache), e o Linux aceita até 40 links numa única resolução antes de retornar ELOOP.
 
 **Veredito:** CONFIRMADA
 
@@ -460,9 +482,9 @@ Detalhe a 8 ms (nossa análise, a partir das requisições concluídas): espera 
 
 **Hipótese:** Os acessos negados serão iguais nos dois modos de bloqueio, pois a proteção não depende da trava. As verificações custarão mais para usuários no fim da ACL ou fora dela. No modo consultivo, as operações de quem não tem a trava passarão (e serão contadas como violações); no mandatório, elas falharão com EBUSY.
 
-**Fundamentação:** Silberschatz §11.6 (listas de acesso e bits rwx de dono/grupo/outros; a ACL permite controle fino, mas tem custo de busca e de tamanho) e §11.1.2 (travas consultivas × mandatórias). A permissão é verificada no `open`, e as operações seguintes usam o modo do descritor.
+**Fundamentação:** Silberschatz §11.6 (listas de acesso e bits rwx de dono, grupo e outros; a ACL permite controle fino, mas tem custo de busca e de tamanho) e §11.1.2 (travas consultivas × mandatórias). A permissão é verificada no `open`, e as operações seguintes usam o modo guardado no descritor.
 
-**Configuração:** Carga `fs_protecao`: alice, bob e carol; `notas.txt` 600 com uma ACL de 10 usuários fictícios antes de `bob:r--`; `conta.txt` 666 disputada por P1 e P2 com `lock`/`unlock` em 20 rodadas. A mesma carga roda com bloqueio consultivo e com bloqueio mandatório.
+**Configuração:** Carga `fs_protecao`: alice, bob e carol; `notas.txt` com permissão 600 e uma ACL de 10 usuários fictícios antes de `bob:r--`; `conta.txt` com permissão 666, disputada por P1 e P2 com `lock`/`unlock` em 20 rodadas. A mesma carga roda com bloqueio consultivo e com bloqueio mandatório.
 
 **Resultados:**
 
@@ -481,17 +503,20 @@ Detalhe a 8 ms (nossa análise, a partir das requisições concluídas): espera 
 **Evidências:** resultados/arquivos.csv (experimento=X10); resultados/arquivos_por_operacao.csv (experimento=X10); graficos/X10_protecao_travas.png.
 
 **Análise:**
-- **Negações:** as 41 negações são idênticas nos dois modos: 1 de bob antes da ACL, 20 de carol (fora da ACL e de "outros") e 20 de bob pedindo `w` com ACL só `r--`.
-- **Custo das verificações:** o total de 961 decompõe-se assim: cada `open` de bob custa 11 comparações (ele é a 11ª entrada da ACL), cada `open` de carol ou de alice custa 12 (a ACL inteira mais os bits), e os arquivos sem ACL custam 1. O custo da ACL cresce linearmente com sua posição e tamanho, e quem não está nela paga a varredura inteira. Por isso sistemas reais verificam só no `open` e guardam o resultado no descritor.
-- **Travas:** no modo consultivo, a trava só funciona entre processos que a pedem. P2 tentou o `lock`, foi negado (20 EBUSY) e mesmo assim escreveu, assim como P1 leu sem a trava: 40 violações, possíveis corrupções. No mandatório, essas 40 operações viraram EBUSY e não chegaram ao disco, por isso o tempo de disco é 15% menor.
+
+As 41 negações foram idênticas nos dois modos: 1 de bob antes da criação da ACL, 20 de carol (que não está na ACL nem tem permissão como "outros") e 20 de bob pedindo escrita com uma ACL que só concede `r--`.
+
+O total de 961 verificações se decompõe da seguinte forma. Cada `open` de bob custa 11 comparações, já que ele é a 11ª entrada da ACL. Cada `open` de carol ou de alice custa 12, porque percorre a ACL inteira e depois os bits. Os arquivos sem ACL custam 1. O custo da ACL cresce linearmente com a posição do usuário e com o tamanho da lista, e quem não está nela paga a varredura completa. Por esse motivo, os sistemas reais verificam a permissão apenas no `open` e guardam o resultado no descritor.
+
+No modo consultivo, a trava só tem efeito entre processos que a solicitam. P2 tentou o `lock`, teve o pedido negado (20 EBUSY) e escreveu mesmo assim, e P1 também leu sem a trava, totalizando 40 violações que, num sistema real, poderiam corromper dados. No modo mandatório, essas 40 operações falharam com EBUSY e não chegaram ao disco, o que explica o tempo de disco 15% menor.
 
 **Veredito:** CONFIRMADA
 
 ### X11 — Métodos de alocação (M6)
 
-**Hipótese:** A contígua terá o acesso mais barato, mas sofrerá fragmentação externa: realocações caras e falhas (ENOSPC) no crescimento com a partição a 85%, mesmo com espaço livre total. A encadeada não fragmenta, mas o acesso direto será caríssimo (percorre a corrente). A FAT terá a mesma disposição sem os acessos extras e será a melhor no geral. A indexada terá 1–2 leituras extras por bloco e um bom acesso direto.
+**Hipótese:** A contígua terá o acesso mais barato, mas sofrerá fragmentação externa, com realocações caras e falhas (ENOSPC) no crescimento com a partição a 85%, mesmo havendo espaço livre total. A encadeada não fragmenta, mas o acesso direto será muito caro, porque precisa percorrer a corrente. A FAT terá a mesma disposição sem os acessos extras e será a melhor no geral. A indexada terá 1 ou 2 leituras extras por bloco e um bom acesso direto.
 
-**Fundamentação:** Silberschatz §12.4 (contígua: first-fit, fragmentação externa, dificuldade de crescer; encadeada: só acesso sequencial eficiente; FAT: ponteiros numa tabela cacheável; indexada: acesso direto com sobrecarga do bloco de índice, em esquemas de vários níveis) e §12.5 (bitmap do espaço livre).
+**Fundamentação:** Silberschatz §12.4 (contígua: first-fit, fragmentação externa e dificuldade de crescer; encadeada: só o acesso sequencial é eficiente; FAT: ponteiros numa tabela que pode ficar em cache; indexada: acesso direto com sobrecarga do bloco de índice, em esquemas de vários níveis) e §12.5 (bitmap do espaço livre).
 
 **Configuração:** Carga `fs_alocacao` numa partição de 20.000 blocos: arquivos de 1–256 blocos até 70% de ocupação, remoção de 40% deles, novo enchimento até 85%, 60 arquivos crescendo em modo acréscimo (2–32 escritas de 4 KiB) e 5 arquivos grandes com 100 leituras aleatórias e uma leitura sequencial em pedaços de 64 KiB.
 
@@ -504,27 +529,31 @@ Detalhe a 8 ms (nossa análise, a partir das requisições concluídas): espera 
 | FAT | 1,90 | 4,01 | 0 | 0 | 1 | 1.939 | 0,64 | — |
 | indexada | 4,29 | 14,32 | 0 | 0 | 1 | 1.805 | 0,65 | 134 |
 
-Por operação: na contígua, `write` custa 15,1 acessos e 78,0 ms; na encadeada, `read` custa 74,9 acessos e `write` 142,9; na indexada, `read` custa 6,1 acessos e 19,0 ms.
+Por operação: na contígua, o `write` custa 15,1 acessos e 78,0 ms; na encadeada, o `read` custa 74,9 acessos e o `write`, 142,9; na indexada, o `read` custa 6,1 acessos e 19,0 ms.
 
 **Evidências:** resultados/arquivos.csv (experimento=X11); resultados/arquivos_por_operacao.csv (experimento=X11); graficos/X11_alocacao.png; graficos/X11_fragmentacao.png.
 
 **Análise:**
-- **Contígua:** a fragmentação externa aparece com clareza. Restaram 2.052 blocos livres em 50 pedaços, o maior com apenas 154 blocos, e 113 escritas falharam por falta de espaço *contíguo*. As 59 realocações copiam o arquivo bloco a bloco, alternando leitura no lugar antigo e escrita no novo, e cada cópia paga busca + rotação. Por isso o `write` custa 78 ms e a contígua tem o **pior** tempo por operação, apesar de ler muito bem.
-- **FAT:** é a melhor (1,9 acessos e 4,0 ms por operação), porque os ponteiros estão na memória. Isso explica a sobrevivência da FAT em mídia removível.
-- **Encadeada:** faz 18 vezes mais acessos que a indexada e mesmo assim é **mais rápida** em tempo (12,7 contra 14,3 ms/op). Os blocos da corrente foram alocados pelo first-free e são, em geral, fisicamente consecutivos, então ler a corrente custa 0,04 ms por bloco, sem rotação. A indexada, ao contrário, alterna leitura do índice e leitura do dado em lugares diferentes e paga rotação **a cada bloco**: uma leitura sequencial de 64 KiB vira 32 acessos alternados, ~4,2 ms cada.
-- **Regra do cursor:** a encadeada escreve muito mal (142,9 acessos por `write`). Cada escrita de 4 KiB em modo acréscimo toca o bloco parcial do cursor, e pela regra "i ≤ cursor recomeça" relê a corrente inteira.
-- **Indexada:** gastou 134 blocos em índices (0,7% do disco).
-- **Resumo:** nenhum método vence em tudo. A contagem de acessos sozinha engana, e o padrão físico dos acessos (sequência ou não) importa tanto quanto o número deles.
+
+Na alocação contígua, a fragmentação externa ficou evidente. Restaram 2.052 blocos livres divididos em 50 segmentos, o maior com apenas 154 blocos, e 113 escritas falharam por falta de espaço contíguo. As 59 realocações copiam o arquivo bloco a bloco, alternando leitura na posição antiga e escrita na nova, e cada cópia paga busca e rotação. Por isso o `write` custa 78 ms e a contígua teve o pior tempo por operação, apesar de ser muito eficiente na leitura.
+
+A FAT foi a melhor alocação, com 1,9 acessos e 4,0 ms por operação, porque os ponteiros ficam na memória. Isso ajuda a entender por que a FAT continua sendo usada em mídias removíveis.
+
+A encadeada fez 18 vezes mais acessos que a indexada e, mesmo assim, foi mais rápida em tempo (12,7 contra 14,3 ms por operação). Os blocos da corrente foram alocados pelo critério do primeiro livre e, em geral, são fisicamente consecutivos, de modo que ler a corrente custa 0,04 ms por bloco, sem rotação. A indexada, ao contrário, alterna entre a leitura do índice e a leitura do dado em posições diferentes e paga rotação a cada bloco: uma leitura sequencial de 64 KiB se transforma em 32 acessos alternados de cerca de 4,2 ms cada. A indexada também gastou 134 blocos com índices, o que corresponde a 0,7% do disco.
+
+A encadeada teve desempenho muito ruim na escrita (142,9 acessos por `write`). Cada escrita de 4 KiB em modo acréscimo toca o bloco parcial do cursor e, pela regra de recomeçar quando i ≤ cursor, relê a corrente inteira.
+
+Em resumo, nenhum método foi o melhor em todos os indicadores. A contagem de acessos, sozinha, não prevê o tempo, porque o padrão físico dos acessos (em sequência ou não) pesa tanto quanto o número deles.
 
 **Veredito:** PARCIALMENTE CONFIRMADA
 
 ### X12 — Integração ponta a ponta
 
-**Hipótese:** Sem cache, as cargas do sistema de arquivos vão gerar filas longas (as operações chegam a cada 0,5–2 ms e cada acesso aleatório leva ~5 ms), e SSTF/SCAN ajudarão pouco, porque os acessos do compilador estão concentrados em poucos cilindros. A alocação indexada gerará mais requisições e mais tempo que a contígua. Com uma cache LRU de 1.024 blocos em write-back, o compilador terá alta taxa de acertos (reuso de cabeçalhos e diretórios), e o banco de dados, baixa (tabela de 16.384 blocos ≫ cache).
+**Hipótese:** Sem cache, as cargas do sistema de arquivos vão gerar filas longas (as operações chegam a cada 0,5–2 ms e cada acesso aleatório leva cerca de 5 ms), e SSTF e SCAN ajudarão pouco, porque os acessos do compilador estão concentrados em poucos cilindros. A alocação indexada gerará mais requisições e mais tempo que a contígua. Com uma cache LRU de 1.024 blocos em write-back, o compilador terá alta taxa de acertos (reuso de cabeçalhos e diretórios), e o banco de dados, baixa (tabela de 16.384 blocos, muito maior que a cache).
 
-**Fundamentação:** Silberschatz §12.6 (a buffer cache e a disposição física dos dados determinam o desempenho), §12.4.3 (overhead do índice) e §10.4 (escalonamento só ajuda com fila).
+**Fundamentação:** Silberschatz §12.6 (a buffer cache e a disposição física dos dados determinam o desempenho), §12.4.3 (sobrecarga do índice) e §10.4 (o escalonamento só ajuda quando há fila).
 
-**Configuração:** As cargas `fs_compilador` e `fs_banco_dados` rodam na alocação contígua e na indexada, guardando o histórico. O histórico vira requisições (`historico_para_requisicoes`), que passam por FCFS, SSTF e SCAN, com e sem cache LRU de 1.024 blocos em write-back.
+**Configuração:** As cargas `fs_compilador` e `fs_banco_dados` rodam na alocação contígua e na indexada, guardando o histórico. O histórico é convertido em requisições (`historico_para_requisicoes`), que passam por FCFS, SSTF e SCAN, com e sem cache LRU de 1.024 blocos em write-back.
 
 **Resultados:**
 
@@ -539,18 +568,21 @@ Por operação: na contígua, `write` custa 15,1 acessos e 78,0 ms; na encadeada
 | banco + indexada | 10.314 | FCFS | 22.146,1 / 52.179,6 | 765,1 / 74,5 |
 | banco + indexada | 10.314 | SSTF | 17.353,2 / 42.512,1 | 509,5 / 74,6 |
 
-Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80, SCAN 49.996 cilindros. Escritas físicas com cache: 0 (compilador) e 670–690 (banco).
+Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80 e SCAN 49.996 cilindros. Escritas físicas com cache: 0 no compilador e entre 670 e 690 no banco.
 
 **Evidências:** resultados/es.csv (experimento=X12); graficos/X12_resposta.png; graficos/X12_deslocamento.png.
 
 **Análise:**
-- **Sem cache, tudo satura:** o tempo total do compilador na contígua com FCFS (11.986,7 ms) é praticamente igual ao tempo de disco medido no X3 (11.986,65 ms), ou seja, o disco fica ocupado 100% do tempo, e as respostas são de segundos.
-- **Escalonadores sem cache:** reduzem o tempo total do banco em 22% (19,8 para 15,4 s), porque ordenam acessos aleatórios dentro da tabela. No compilador, a redução é de 17% e a resposta média nem melhora, porque os dados ocupam poucos cilindros: o custo é a rotação, não a busca.
-- **Indexada sem cache:** é desastrosa, com 2,2 vezes mais requisições e 2,7 vezes mais tempo. Cada bloco de dados exige antes a leitura do bloco de índice, o que quebra a sequência física.
-- **Com cache, o compilador vira outro sistema:** 90–96% de acertos, resposta de 0,15–0,23 ms, e a diferença entre contígua e indexada **desaparece**. Os blocos de índice são os mais quentes da cache, e é por isso que a indexada tem *mais* acertos (95,7%).
-- **Banco de dados com cache:** na contígua, a taxa de 4,9% é quase exatamente a razão entre a capacidade da cache e o tamanho da tabela (1.024 / 16.384 = 6,25%), como esperado para acessos uniformes. Na indexada, 74,5% dos acertos vêm dos 17 blocos de índice (2 de cada 3 requisições), o que faz a indexada com cache ficar *mais rápida* que a contígua com cache (510 contra 1.412 ms com SSTF). Na contígua, as escritas (com o log) e as faltas ainda congestionam o disco.
-- **SCAN com cache:** com a fila quase sempre vazia, o SCAN vai até a borda 5 vezes (49.996 cilindros contra 80 do SSTF).
-- **Escritas físicas zeradas no compilador:** a carga termina antes da primeira sincronização (5 s). Todos os `.o` gravados ainda estavam só na memória no fim da simulação, e uma queda de energia os perderia.
+
+Sem cache, o disco satura em todas as combinações. O tempo total do compilador na alocação contígua com FCFS (11.986,7 ms) é praticamente igual ao tempo de disco medido no X3 (11.986,65 ms), o que significa que o disco ficou ocupado durante todo o tempo e as respostas chegaram à ordem de segundos.
+
+Ainda sem cache, os escalonadores reduziram o tempo total do banco de dados em 22% (de 19,8 para 15,4 s), porque conseguem ordenar os acessos aleatórios dentro da tabela. No compilador, a redução foi de 17% e a resposta média nem chegou a melhorar, já que os dados ocupam poucos cilindros e o custo dominante é a rotação, não a busca. A alocação indexada sem cache teve o pior desempenho, com 2,2 vezes mais requisições e 2,7 vezes mais tempo que a contígua. Cada bloco de dados exige antes a leitura do bloco de índice, o que quebra a sequência física.
+
+Com a cache, o comportamento do compilador muda completamente. A taxa de acertos fica entre 90% e 96%, a resposta cai para 0,15 a 0,23 ms e a diferença entre contígua e indexada desaparece. Os blocos de índice são os mais acessados da cache, e é por isso que a indexada chega a ter mais acertos (95,7%).
+
+No banco de dados com cache, a taxa de acertos da contígua (4,9%) ficou próxima da razão entre a capacidade da cache e o tamanho da tabela (1.024 / 16.384 = 6,25%), como se espera para acessos uniformes. Na indexada, 74,5% de acertos vêm dos 17 blocos de índice, que aparecem em 2 de cada 3 requisições, e isso faz a indexada com cache ser mais rápida que a contígua com cache (510 contra 1.412 ms com SSTF). Na contígua, as escritas, somadas ao log, e as faltas continuam congestionando o disco.
+
+Com a fila quase sempre vazia, o SCAN foi até a borda 5 vezes e percorreu 49.996 cilindros, contra 80 do SSTF. Por fim, o compilador não teve nenhuma escrita física porque a carga termina antes da primeira sincronização (5 s). Todos os arquivos `.o` gravados ainda estavam apenas na memória no fim da simulação, e uma queda de energia nesse momento os perderia.
 
 **Veredito:** PARCIALMENTE CONFIRMADA
 
@@ -558,9 +590,9 @@ Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80, SCAN 49.996
 
 **Hipótese:** O flash terá resposta uma a duas ordens de grandeza menor que o disco rígido, pois não há busca nem rotação. Como o dispositivo começa vazio e as cargas gravam poucos milhares de páginas, a coleta de lixo não será acionada no X13 (amplificação de escrita = 1, zero apagamentos). Com o dispositivo cheio (extra E1), a amplificação será alta e cairá com mais área de reserva.
 
-**Fundamentação:** Silberschatz §10.1.2 (memória não volátil: sem partes móveis, apagamento por bloco, desgaste, FTL e coleta de lixo). A gravação só ocorre em página apagada, e o apagamento é por bloco de 64 páginas. Com a área de reserva de 7% do modelo, uma aproximação analítica conhecida para coleta gulosa com gravações uniformes dá amplificação ≈ (1 + r) / (2r), cerca de 7,6.
+**Fundamentação:** Silberschatz §10.1.2 (memória não volátil: sem partes móveis, apagamento por bloco, desgaste, FTL e coleta de lixo). A gravação só ocorre em página apagada, e o apagamento é feito por bloco de 64 páginas. Com a área de reserva de 7% do modelo, uma aproximação analítica conhecida para coleta gulosa com gravações uniformes dá amplificação de aproximadamente (1 + r) / (2r), cerca de 7,6.
 
-**Configuração:** Cargas `es_reuso` e `es_aleatoria`, FCFS, disco rígido × flash (oficial). Extra E1: flash de 32.000 páginas lógicas, preenchido e com 64.000 regravações de envelhecimento, depois 60.000 gravações aleatórias de 1 página, com reserva de 7%, 15% e 28%.
+**Configuração:** Cargas `es_reuso` e `es_aleatoria`, FCFS, disco rígido × flash (oficial). Extra E1: flash de 32.000 páginas lógicas, preenchido e com 64.000 regravações de envelhecimento, seguidas de 60.000 gravações aleatórias de 1 página, com reserva de 7%, 15% e 28%.
 
 **Resultados:**
 
@@ -580,54 +612,68 @@ Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80, SCAN 49.996
 **Evidências:** resultados/es.csv (experimento=X13); graficos/X13_flash.png; resultados/extras/E1_flash_estado_estacionario.csv; graficos/extras/E1_flash_amplificacao.png.
 
 **Análise:**
-- **Resposta:** o flash responde em 0,09–0,64 ms contra 50–3.500 ms do disco. Na carga `reuso`, o disco está saturado e o flash não: uma leitura custa 0,025 ms e uma gravação 0,2 ms, contra ~10 ms no disco.
-- **Amplificação no X13:** como previsto, a amplificação foi 1,0 e houve zero apagamentos. As cargas gravam no máximo 4.792 páginas num dispositivo de 342.400; a FTL apenas escreve em log em páginas novas, sem nunca precisar recuperar espaço. O X13 oficial mostra o SSD *novo* e esconde o custo que aparece com o uso.
-- **Estado estacionário (E1):** com a reserva de 7%, cada página gravada pelo host custa ~8 programações, perto da aproximação teórica de 7,6. A escrita média sobe de 0,2 para 1,95 ms, e o p99 vai a 112 ms (pausas da coleta, que ocorrem durante a própria gravação). Dobrar a reserva para 15% corta a amplificação pela metade, e 28% a reduz para ~2,9, com apagamentos (desgaste) caindo na mesma proporção. Isso explica SSDs "enterprise" com mais overprovisioning e o comando TRIM, que devolve à FTL páginas que o sistema de arquivos já liberou.
-- **Frente quente:** regravar só metade do espaço lógico não ajudou a coleta gulosa, porque ela não separa dados quentes de frios. FTLs reais fazem essa separação.
+
+O flash respondeu entre 0,09 e 0,64 ms, contra 50 a 3.500 ms do disco rígido. Na carga `reuso`, o disco estava saturado e o flash não, já que no flash uma leitura custa 0,025 ms e uma gravação 0,2 ms, contra cerca de 10 ms no disco.
+
+Como previsto, a amplificação no X13 foi 1,0 e não houve nenhum apagamento. As cargas gravam no máximo 4.792 páginas num dispositivo de 342.400, então a FTL apenas escreve em log em páginas novas e nunca precisa recuperar espaço. O X13 oficial, portanto, representa um SSD novo e não mostra o custo que aparece com o uso.
+
+Esse custo aparece no estado estacionário do extra E1. Com reserva de 7%, cada página gravada pelo host exigiu cerca de 8 programações, valor próximo da aproximação teórica de 7,6. A escrita média subiu de 0,2 para 1,95 ms, e o percentil 99 chegou a 112 ms por causa das pausas da coleta, que ocorrem durante a própria gravação. Dobrar a reserva para 15% reduziu a amplificação pela metade, e com 28% ela caiu para cerca de 2,9, com os apagamentos (e portanto o desgaste) diminuindo na mesma proporção. Isso explica por que SSDs corporativos têm mais área de reserva (overprovisioning) e por que existe o comando TRIM, que informa à FTL quais páginas o sistema de arquivos já liberou.
+
+Regravar apenas metade do espaço lógico não ajudou a coleta gulosa, porque ela não separa dados muito regravados (quentes) de dados pouco alterados (frios). FTLs reais fazem essa separação.
 
 **Veredito:** CONFIRMADA
 
 ## 4. Relação com sistemas reais
 
-**Escalonadores de E/S (X1, X7).** O mq-deadline do Linux, base do nosso DEADLINE, usa por padrão prazos de 500 ms para leituras e 5 s para escritas, e atende lotes de requisições na ordem de posição ([kernel: mq-deadline.c](https://elixir.bootlin.com/linux/v5.8.7/source/block/mq-deadline.c)). O simulador reduziu esses prazos para 200 ms e 2 s, mas a assimetria é a mesma. O X7 mostra por que ela existe: leituras costumam bloquear processos, e o DEADLINE limitou a espera delas sem perder a média do SSTF. O BFQ privilegia a latência de aplicações interativas e distribui banda por processo, aceitando perder vazão ([kernel: BFQ](https://kernel.org/doc/html/v6.15/block/bfq-iosched.html)). Ele ataca a inanição que o SSTF mostrou no X1 (concentrada) e no X7. Para SSDs NVMe, costuma-se usar `none` (sem reordenação), porque o dispositivo não tem braço e possui filas internas profundas. O X13 explica: sem busca nem rotação, reordenar não traz ganho. Algumas distribuições escolhem BFQ para discos rotacionais e mq-deadline/none para os demais ([SUSE: Tuning I/O](https://documentation.suse.com/sles/html/SLES-all/cha-tuning-io.html)). Windows e macOS não oferecem ao usuário uma escolha equivalente de escalonador; boa parte da reordenação fica no próprio dispositivo (NCQ/filas NVMe).
+**Escalonadores de E/S (X1, X7).** O mq-deadline do Linux, que serviu de base para o nosso DEADLINE, usa por padrão prazos de 500 ms para leituras e 5 s para escritas e atende lotes de requisições na ordem de posição ([kernel: mq-deadline.c](https://elixir.bootlin.com/linux/v5.8.7/source/block/mq-deadline.c)). O simulador reduz esses prazos para 200 ms e 2 s, mas mantém a mesma assimetria. O X7 mostra a razão dessa escolha: as leituras costumam bloquear processos, e o DEADLINE limitou a espera delas sem perder a média do SSTF. O BFQ privilegia a latência de aplicações interativas e distribui a banda por processo, aceitando alguma perda de vazão ([kernel: BFQ](https://kernel.org/doc/html/v6.15/block/bfq-iosched.html)), o que ataca a inanição observada no SSTF no X1 (carga concentrada) e no X7. Para SSDs NVMe, costuma-se usar o escalonador `none`, sem reordenação, porque o dispositivo não tem braço e possui filas internas profundas. O X13 ajuda a entender essa escolha, já que sem busca nem rotação não há ganho em reordenar. Algumas distribuições adotam o BFQ para discos rotacionais e o mq-deadline ou `none` para os demais ([SUSE: Tuning I/O](https://documentation.suse.com/sles/html/SLES-all/cha-tuning-io.html)). Windows e macOS não oferecem ao usuário uma escolha equivalente de escalonador, e boa parte da reordenação fica a cargo do próprio dispositivo (NCQ e filas NVMe).
 
-**Polling × interrupção × DMA (X2, X8).** O Linux oferece polling de conclusão para dispositivos de baixíssima latência (`io_poll`) e polling híbrido, que dorme pelo tempo médio esperado antes de começar a testar ([LWN: block layer](https://lwn.net/Articles/735275/)). É a conclusão do X2: o polling ganha quando o dispositivo responde em menos tempo que o custo de uma interrupção. Frameworks como o SPDK levam isso ao extremo, com drivers NVMe sem interrupção. O DMA é universal em discos, NVMe e placas de rede (bus mastering); o X8 mostra que ele só compensa a partir de transferências de mais de uma palavra ou bloco.
+**Polling × interrupção × DMA (X2, X8).** O Linux oferece polling de conclusão para dispositivos de baixíssima latência (`io_poll`) e um polling híbrido, que espera o tempo médio previsto antes de começar a testar o dispositivo ([LWN: block layer](https://lwn.net/Articles/735275/)). Isso está de acordo com a conclusão do X2: o polling compensa quando o dispositivo responde em menos tempo que o custo de uma interrupção. Frameworks como o SPDK levam essa ideia ao extremo, com drivers NVMe que não usam interrupção. O DMA é usado em praticamente todos os discos, dispositivos NVMe e placas de rede (bus mastering), e o X8 mostra que ele só compensa a partir de transferências maiores que um bloco.
 
-**Cache de páginas e gravação periódica (X6, X12, E2).** O Linux acorda as threads de flush periodicamente (`dirty_writeback_centisecs`) e grava dados sujos "velhos" (`dirty_expire_centisecs`), além de limites por volume de dados sujos (`dirty_background_ratio`, `dirty_ratio`) ([kernel: sysctl/vm](https://www.kernel.org/doc/Documentation/sysctl/vm.txt)). O lazy writer do Windows roda a cada segundo e grava uma fração (1/8) das páginas sujas, em vez de despejar tudo de uma vez ([Microsoft: File Caching](https://learn.microsoft.com/en-us/windows/win32/FileIO/file-caching)). Essa é exatamente a mitigação da tempestade que medimos no E2: gravar pouco e com frequência suaviza as rajadas que, no nosso modelo de sincronização total a cada 5 s, multiplicaram por 14 a resposta das leituras. Em todos os sistemas, dados em write-back se perdem numa queda (X6: até 55 blocos). Por isso existem `fsync()` e o write-through por arquivo (`FILE_FLAG_WRITE_THROUGH` no Windows). No macOS, o `fsync()` entrega os dados ao disco, mas não garante que o dispositivo os grave fisicamente. Para isso existe o `F_FULLFSYNC` ([Apple: fsync(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html)), uma camada de cache (a do dispositivo) que nosso modelo não tem.
+**Cache de páginas e gravação periódica (X6, X12, E2).** O Linux acorda periodicamente as threads de flush (`dirty_writeback_centisecs`), grava os dados sujos mais antigos (`dirty_expire_centisecs`) e impõe limites ao volume de dados sujos (`dirty_background_ratio`, `dirty_ratio`) ([kernel: sysctl/vm](https://www.kernel.org/doc/Documentation/sysctl/vm.txt)). O lazy writer do Windows roda a cada segundo e grava uma fração (1/8) das páginas sujas, em vez de despejar todas de uma vez ([Microsoft: File Caching](https://learn.microsoft.com/en-us/windows/win32/FileIO/file-caching)). Essa é a mesma forma de atenuar as rajadas que medimos no E2: gravar pouco e com frequência evita os picos que, no nosso modelo de sincronização total a cada 5 s, multiplicaram por 14 a resposta das leituras. Em todos esses sistemas, dados em write-back se perdem numa queda de energia (no X6, até 55 blocos), e por isso existem o `fsync()` e o write-through por arquivo (`FILE_FLAG_WRITE_THROUGH` no Windows). No macOS, o `fsync()` entrega os dados ao disco, mas não garante que o dispositivo os grave fisicamente, e para isso existe o `F_FULLFSYNC` ([Apple: fsync(2)](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fsync.2.html)). Essa camada de cache do próprio dispositivo não existe no nosso modelo.
 
-**Resolução de caminhos e cache de diretórios (X4, X9).** O Linux mantém o dcache, uma cache de nomes (dentries) que torna a resolução quase sempre independente do disco ([kernel: path-lookup](https://www.kernel.org/doc/Documentation/filesystems/path-lookup.md)). No nosso modelo, sem essa cache, cada nível custa uma leitura (X4), e cada link simbólico recomeça a busca desde a raiz (X9). O Windows faz o mesmo papel com as caches do gerenciador de objetos e do NTFS. Medimos isso no extra E3: no Windows 11 com NTFS, o `open` levou 27 µs no SSD e 41 µs no HDD, sem variar de 1 a 10 níveis, contra 4,25 a 4,61 ms no simulador. O Linux também limita a quantidade de links simbólicos seguidos (ELOOP): são 40 por resolução, contra o nosso limite de 8.
+**Resolução de caminhos e cache de diretórios (X4, X9).** O Linux mantém o dcache, uma cache de nomes (dentries) que torna a resolução de caminhos quase sempre independente do disco ([kernel: path-lookup](https://www.kernel.org/doc/Documentation/filesystems/path-lookup.md)). No nosso modelo, que não tem essa cache, cada nível custa uma leitura (X4) e cada link simbólico recomeça a busca pela raiz (X9). No Windows, esse papel é cumprido pelas caches do gerenciador de objetos e do NTFS, o que medimos no extra E3: no Windows 11 com NTFS, o `open` levou 27 µs no SSD e 41 µs no HDD, sem variar de 1 a 10 níveis, contra 4,25 a 4,61 ms no simulador. O Linux também limita a quantidade de links simbólicos seguidos numa resolução a 40 antes de retornar ELOOP, enquanto o nosso limite é de 8.
 
-**Tabelas de arquivos abertos (X5).** No Unix, cada processo tem uma tabela de descritores que aponta para "descrições de arquivo aberto" (`struct file`, com posição e modo), que apontam para o inode compartilhado. No Windows, a tabela de handles do processo aponta para objetos de arquivo, e um bloco de controle por arquivo é compartilhado. É a mesma divisão em dois níveis do X5. Diferença: no Unix, um `fork` faz pai e filho compartilharem a mesma posição, caso que o modelo não simula.
+**Tabelas de arquivos abertos (X5).** No Unix, cada processo tem uma tabela de descritores que aponta para descrições de arquivo aberto (`struct file`, com posição e modo), que por sua vez apontam para o inode compartilhado. No Windows, a tabela de handles do processo aponta para objetos de arquivo, e um bloco de controle por arquivo é compartilhado. Em ambos os casos há a mesma divisão em dois níveis observada no X5. Uma diferença é que, no Unix, após um `fork` pai e filho compartilham a mesma posição, caso que o modelo não simula.
 
-**Proteção (X10).** O Linux usa bits rwx e ACLs POSIX opcionais; NTFS e APFS usam ACLs ricas (o APFS suporta permissões Unix e ACLs NFSv4). Todos verificam no `open` e guardam o modo no descritor, como o modelo. O custo linear da ACL que medimos é real, por isso as ACLs costumam ser curtas e baseadas em grupos.
+**Proteção (X10).** O Linux usa bits rwx e, opcionalmente, ACLs POSIX, enquanto NTFS e APFS usam ACLs mais completas (o APFS suporta permissões Unix e ACLs NFSv4). Todos verificam a permissão no `open` e guardam o modo no descritor, como no modelo. O custo linear da ACL que medimos também existe nos sistemas reais, e por isso as ACLs costumam ser curtas e baseadas em grupos.
 
-**Travas (X10).** No Windows, as travas de `LockFileEx` são mandatórias: um `ReadFile`/`WriteFile` de outro processo na região travada falha com `ERROR_LOCK_VIOLATION` ([Microsoft: Locking byte ranges](https://learn.microsoft.com/en-ie/Windows/Win32/fileio/locking-and-unlocking-byte-ranges-in-files)), exatamente o EBUSY do nosso modo mandatório. No Linux, as travas (`flock`, `fcntl`) são consultivas, e o suporte a travas mandatórias foi removido do kernel na versão 5.15 ([LKML: fcntl.2](https://lkml.iu.edu/hypermail/linux/kernel/2110.0/00378.html)). O macOS segue o modelo BSD, também consultivo. O X10 mostra o risco: no modo consultivo, 40 operações ignoraram a trava.
+**Travas (X10).** No Windows, as travas de `LockFileEx` são mandatórias: um `ReadFile` ou `WriteFile` de outro processo na região travada falha com `ERROR_LOCK_VIOLATION` ([Microsoft: Locking byte ranges](https://learn.microsoft.com/en-ie/Windows/Win32/fileio/locking-and-unlocking-byte-ranges-in-files)), comportamento equivalente ao EBUSY do nosso modo mandatório. No Linux, as travas (`flock`, `fcntl`) são consultivas, e o suporte a travas mandatórias foi removido do kernel na versão 5.15 ([LKML: fcntl.2](https://lkml.iu.edu/hypermail/linux/kernel/2110.0/00378.html)). O macOS segue o modelo BSD, também consultivo. O X10 ilustra o risco desse modelo, já que no modo consultivo 40 operações ignoraram a trava.
 
-**Alocação (X11, X12).** A FAT (FAT32/exFAT) continua sendo o padrão de pendrives e cartões: SDHC usa FAT32, e SDXC usa exFAT por especificação ([SanDisk: SDHC × SDXC](https://www.sandisk.com/topics/memory-cards/sdhc-vs-sdxc-comparison)). É a simplicidade da tabela em memória que o X11 premiou. O ext2/ext3 usava blocos de índice diretos, indiretos e duplamente indiretos (até 1.024 ponteiros por bloco de 4 KiB, como no nosso índice), e o ext4 trocou isso por *extents*, intervalos contíguos de blocos, com até 4 extents dentro do próprio inode ([kernel: ext4 i_block](https://docs.kernel.org/filesystems/ext4/ifork.html)). Isso combina o melhor da contígua (sequência física, poucos metadados) com a flexibilidade da indexada, e evita o problema do X11, em que reler o índice quebrava a sequência. No NTFS, a MFT guarda os metadados e, para arquivos pequenos, os próprios dados (atributos residentes), economizando o acesso extra ([NTFS.com: MFT](https://www.ntfs.com/ntfs-mft.htm)). O APFS usa copy-on-write para os metadados e clones que compartilham blocos ([Wikipedia: APFS](https://en.wikipedia.org/wiki/Apple_File_System)): a mesma ideia da FTL do X13, nunca sobrescrever no lugar.
+**Alocação (X11, X12).** A FAT (FAT32 e exFAT) continua sendo o padrão de pendrives e cartões de memória: por especificação, cartões SDHC usam FAT32 e SDXC usam exFAT ([SanDisk: SDHC × SDXC](https://www.sandisk.com/topics/memory-cards/sdhc-vs-sdxc-comparison)). A simplicidade de manter a tabela em memória foi justamente o que favoreceu a FAT no X11. O ext2 e o ext3 usavam blocos de índice diretos, indiretos e duplamente indiretos (até 1.024 ponteiros por bloco de 4 KiB, como no nosso índice), e o ext4 substituiu esse esquema por extents, intervalos contíguos de blocos, com até 4 extents dentro do próprio inode ([kernel: ext4 i_block](https://docs.kernel.org/filesystems/ext4/ifork.html)). Essa solução combina as vantagens da alocação contígua (sequência física e poucos metadados) com a flexibilidade da indexada, e evita o problema observado no X11, em que reler o índice quebrava a sequência. No NTFS, a MFT guarda os metadados e, no caso de arquivos pequenos, os próprios dados (atributos residentes), economizando um acesso ([NTFS.com: MFT](https://www.ntfs.com/ntfs-mft.htm)). O APFS usa copy-on-write nos metadados e clones que compartilham blocos ([Wikipedia: APFS](https://en.wikipedia.org/wiki/Apple_File_System)), seguindo a mesma ideia da FTL do X13 de nunca sobrescrever dados no lugar.
 
-**Flash (X13, E1).** SSDs e celulares (UFS/eMMC) têm uma FTL como a nossa, com coleta de lixo, nivelamento de desgaste e área de reserva. O TRIM permite que o sistema avise quais páginas estão livres, reduzindo a amplificação medida no E1.
+**Flash (X13, E1).** SSDs e o armazenamento de celulares (UFS e eMMC) têm uma FTL semelhante à nossa, com coleta de lixo, nivelamento de desgaste e área de reserva. O TRIM permite que o sistema informe ao dispositivo quais páginas estão livres, reduzindo a amplificação medida no E1.
 
 ## 5. Limitações do simulador
 
-- **Disco simplificado:** a busca é linear na distância, quando na prática é ~√d para distâncias curtas. A rotação é sempre meia volta (não depende da posição angular), e não há cache no disco nem NCQ. Em discos reais, o próprio dispositivo reordena requisições (NCQ), o que reduz a diferença entre escalonadores do X1/X7. A regra "rotação = 0 só no bloco imediatamente seguinte" exagera o ganho da sequência: explica os 590× do X1 sequencial e os 0,04 ms por nível do X4.
-- **Sem cache no sistema de arquivos:** a camada de blocos não tem cache de diretórios, de inodes nem de índices. Isso infla o custo do `open` (X4), dos links (X9) e da indexada (X11). Na integração (X12), a cache LRU mostrou o quanto isso muda as conclusões. O extra E3 quantifica a distorção numa máquina real: o `open` leva ~27 µs (SSD) ou ~41 µs (HDD), independentemente da profundidade, cerca de 160 vezes menos que no modelo. As conclusões do X4 e do X9 sobre contagem de acessos valem para o **primeiro** acesso a um caminho (cache fria). Os acessos seguintes quase nunca chegam ao disco.
-- **Metadados no diretório, não num inode:** pela regra do modelo, o `close` de um arquivo sujo grava o bloco do diretório onde ele foi **criado** (`fcb.pai`). Com hard links (X9), isso continua valendo mesmo que o arquivo tenha sido aberto por outro nome, ou que o nome original já tenha sido removido. No Unix, tamanho e datas ficam no inode, separado das entradas de diretório, e um nome a mais não muda onde os metadados são gravados.
-- **Tempo nas cargas de arquivos:** os instantes das operações são fixos (0,5–2 ms entre operações) e não esperam o disco. No X12, isso cria filas irreais de segundos; um processo real esperaria o `read` terminar antes de emitir o próximo.
-- **Write-back simplificado:** sincronização total a cada 5 s, sem limite de sujos nem gravação por idade, o que gera as tempestades do X6/E2 de forma mais intensa que no Linux ou no Windows. O fim da simulação não faz *flush*, por isso o X12 mostra 0 escritas físicas.
-- **Regras literais:** "cursor da encadeada recomeça em i ≤ c" (X11) e "toda revisita é ciclo" (X9) diferem do que sistemas reais fazem. Os números refletem as regras, e discutimos o efeito em cada caso.
-- **Escalonadores sem preempção:** não modelamos lotes (`fifo_batch`) nem a separação leitura/escrita do mq-deadline real.
-- **CPU:** não há disputa de CPU nem o tempo das próprias decisões do escalonador.
-- **Flash:** sem TRIM, sem separação quente/frio e sem paralelismo entre chips. O X13 oficial usa um dispositivo novo (amplificação de escrita = 1), e o estado estacionário só aparece no extra E1, com um dispositivo menor.
-- **Cargas sintéticas:** Zipf, exponencial e concentrada 80/20 são aproximações. Uma única semente por carga não dá intervalo de confiança.
+O modelo do disco é simplificado. A busca é linear na distância, quando na prática se aproxima de √d para distâncias curtas, e a rotação é sempre de meia volta, sem depender da posição angular. Também não há cache no disco nem NCQ, e em discos reais o próprio dispositivo reordena as requisições, o que reduziria a diferença entre os escalonadores no X1 e no X7. Além disso, a regra de que a rotação só é zero no bloco imediatamente seguinte exagera o ganho da sequência física, e é ela que explica a diferença de 590 vezes no X1 sequencial e os 0,04 ms por nível do X4.
+
+A camada de blocos do sistema de arquivos não tem cache de diretórios, de inodes nem de índices, o que aumenta o custo do `open` (X4), dos links (X9) e da alocação indexada (X11). Na integração (X12), a cache LRU mostrou o quanto essa ausência altera as conclusões. O extra E3 quantifica essa distorção numa máquina real, onde o `open` leva cerca de 27 µs no SSD ou 41 µs no HDD, independentemente da profundidade, aproximadamente 160 vezes menos que no modelo. As conclusões do X4 e do X9 sobre a contagem de acessos valem, portanto, para o primeiro acesso a um caminho (cache fria), já que os acessos seguintes quase nunca chegam ao disco.
+
+No modelo, os metadados ficam no diretório e não num inode. Pela regra, o `close` de um arquivo sujo grava o bloco do diretório onde ele foi criado (`fcb.pai`). Com hard links (X9), isso continua valendo mesmo que o arquivo tenha sido aberto por outro nome ou que o nome original já tenha sido removido. No Unix, tamanho e datas ficam no inode, separados das entradas de diretório, e um nome a mais não muda onde os metadados são gravados.
+
+Nas cargas de arquivos, os instantes das operações são fixos (0,5 a 2 ms entre operações) e não esperam o disco. No X12, isso cria filas de vários segundos que não ocorreriam na prática, pois um processo real esperaria o `read` terminar antes de emitir a próxima operação.
+
+O write-back também é simplificado. A sincronização é total a cada 5 s, sem limite de blocos sujos nem gravação por idade, o que torna as rajadas do X6 e do E2 mais intensas do que seriam no Linux ou no Windows. O fim da simulação não faz flush, e por isso o X12 mostra 0 escritas físicas no compilador.
+
+Algumas regras do enunciado diferem do que os sistemas reais fazem, como recomeçar a corrente da encadeada quando i ≤ cursor (X11) e contar toda revisita como ciclo (X9). Os números refletem essas regras, e discutimos o efeito em cada experimento.
+
+Também não modelamos os lotes (`fifo_batch`) nem a separação entre filas de leitura e de escrita do mq-deadline real, nem a disputa pela CPU ou o tempo gasto nas próprias decisões do escalonador. No flash, não há TRIM, separação entre dados quentes e frios nem paralelismo entre chips. O X13 oficial usa um dispositivo novo (amplificação de escrita igual a 1), e o estado estacionário só aparece no extra E1, com um dispositivo menor.
+
+Por fim, as cargas sintéticas (Zipf, exponencial e concentrada 80/20) são apenas aproximações de cargas reais, e como usamos uma única semente por carga não é possível calcular intervalos de confiança.
 
 ## 6. Conclusões
 
-1. Num disco rígido, o escalonador importa quando há fila, e o maior ganho vem de preservar a sequência física, que elimina a rotação. Reduzir distância ajuda menos do que parece, porque a rotação e a busca mínima são custos fixos (X1).
-2. SSTF e DEADLINE dão as menores médias. O DEADLINE limita a espera das leituras sem perder a média, e o LOOK/C-LOOK é o melhor compromisso de justiça. O SCAN/C-SCAN "puros" são ruins com carga leve por irem até a borda (X1, X7).
-3. Polling compensa só em dispositivos de microssegundos, e o DMA só a partir de dois blocos. O buffer duplo dobra a vazão quando produtor e dispositivo têm a mesma velocidade, e um terceiro buffer não ajuda com taxas constantes (X2, X8).
-4. A cache é a otimização dominante: tira o disco da saturação e faz diferenças de alocação desaparecerem. O write-back troca durabilidade e picos de latência (tempestades no sync) por menos escritas (X6, X12, E2).
-5. Metadados custam caro: a profundidade do caminho, os links simbólicos e os blocos de índice somam acessos. Como esses acessos caem, ou não, em sequência física, a contagem de acessos sozinha não prevê o tempo (X4, X9, X11).
-6. Um SSD novo esconde o custo da coleta de lixo. Em uso contínuo, a amplificação de escrita chega a ~8 com 7% de reserva e cai com mais overprovisioning (X13, E1).
+Num disco rígido, o escalonador só faz diferença quando há fila, e o maior ganho vem de preservar a sequência física dos blocos, o que elimina a rotação. Reduzir a distância percorrida pelo braço ajuda menos do que se poderia esperar, porque a rotação e a busca mínima são custos fixos (X1).
+
+Entre os escalonadores, SSTF e DEADLINE obtiveram as menores médias, e o DEADLINE ainda limita a espera das leituras sem perder desempenho médio. LOOK e C-LOOK representaram o melhor equilíbrio entre desempenho e justiça, enquanto SCAN e C-SCAN tiveram desempenho ruim com carga leve, por irem até a borda sem necessidade (X1 e X7).
+
+O polling só compensa em dispositivos com latência de microssegundos, e o DMA só a partir de dois blocos. O buffer duplo praticamente dobra a vazão quando produtor e dispositivo têm a mesma velocidade, e um terceiro buffer não traz ganho com taxas constantes (X2 e X8).
+
+A cache foi a otimização de maior impacto. Ela tira o disco da saturação e faz as diferenças entre métodos de alocação praticamente desaparecerem. O write-back reduz o número de escritas, mas em troca perde dados numa queda de energia e cria picos de latência a cada sincronização (X6, X12 e E2).
+
+Os metadados têm custo elevado: a profundidade do caminho, os links simbólicos e os blocos de índice acrescentam acessos. Como esses acessos podem ou não cair em sequência física, a contagem de acessos sozinha não é suficiente para prever o tempo (X4, X9 e X11).
+
+Por fim, um SSD novo não mostra o custo da coleta de lixo. Em uso contínuo, a amplificação de escrita chegou a cerca de 8 com 7% de reserva e diminuiu com o aumento da área de reserva (X13 e E1).
 
 ## 7. Referências
 
@@ -653,7 +699,7 @@ Deslocamento no compilador + contígua com cache: FCFS 104, SSTF 80, SCAN 49.996
 Diogo: escalonadores (N2 e M2), os experimentos X1, X2 e X7, o repositório e a organização da entrega.
 Pedro: sistema de arquivos e links (N3 e M4), os experimentos X3, X4, X5 e X9.
 Elisa: cache, DMA e buffering (M1 e M3), a integração e os experimentos X6, X8 e X12.
-Maria Julia: proteção e travas (M5), alocação (M6), o bônus do flash, os experimentos X10, X11 e X13 e a pesquisa sobre sistemas reais da seção 4.
+Maria Júlia: proteção e travas (M5), alocação (M6), o bônus do flash, os experimentos X10, X11 e X13 e a pesquisa sobre sistemas reais da seção 4.
 
 
 | Ferramenta | Finalidade | Onde foi usada (arquivos ou seções) |
